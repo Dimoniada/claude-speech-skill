@@ -43,8 +43,26 @@ def build_tag_regex(tag: str) -> re.Pattern[str]:
     return re.compile(rf"<{safe}>(.*?)</{safe}>", re.DOTALL | re.IGNORECASE)
 
 
+_CODE_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
+_INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
+
+
+def strip_markdown_code(text: str) -> str:
+    """Remove Markdown code fences and inline-code spans from text.
+
+    The assistant often mentions the language tag literally inside backticks
+    when explaining how the skill works (e.g. `<en>` blocks). Without this
+    strip, a bare `<en>` in prose would pair with the next `</en>` and
+    cause the regex to swallow all intervening text into the spoken output.
+    """
+    text = _CODE_FENCE_RE.sub("", text)
+    text = _INLINE_CODE_RE.sub("", text)
+    return text
+
+
 def extract_tagged(text: str, pattern: re.Pattern[str]) -> str:
-    matches = pattern.findall(text)
+    cleaned = strip_markdown_code(text)
+    matches = pattern.findall(cleaned)
     return " ".join(m.strip() for m in matches if m.strip())
 
 
