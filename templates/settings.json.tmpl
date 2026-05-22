@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "py \"{{TARGET}}\\scripts\\speak_lang.py\" --voice {{VOICE}} --tag {{LANG_CODE}}"
+          }
+        ]
+      }
+    ]
+  }
+}

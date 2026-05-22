@@ -1,0 +1,13 @@
+[
+  {"name": "Dutch",      "code": "nl", "iso": "nl-NL", "voice": "nl-NL-FennaNeural"},
+  {"name": "German",     "code": "de", "iso": "de-DE", "voice": "de-DE-KatjaNeural"},
+  {"name": "Spanish",    "code": "es", "iso": "es-ES", "voice": "es-ES-ElviraNeural"},
+  {"name": "French",     "code": "fr", "iso": "fr-FR", "voice": "fr-FR-DeniseNeural"},
+  {"name": "Italian",    "code": "it", "iso": "it-IT", "voice": "it-IT-ElsaNeural"},
+  {"name": "Portuguese", "code": "pt", "iso": "pt-PT", "voice": "pt-PT-RaquelNeural"},
+  {"name": "Russian",    "code": "ru", "iso": "ru-RU", "voice": "ru-RU-SvetlanaNeural"},
+  {"name": "English",    "code": "en", "iso": "en-US", "voice": "en-US-JennyNeural"},
+  {"name": "Polish",     "code": "pl", "iso": "pl-PL", "voice": "pl-PL-ZofiaNeural"},
+  {"name": "Japanese",   "code": "ja", "iso": "ja-JP", "voice": "ja-JP-NanamiNeural"},
+  {"name": "Chinese",    "code": "zh", "iso": "zh-CN", "voice": "zh-CN-XiaoxiaoNeural"}
+]
