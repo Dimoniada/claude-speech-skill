@@ -73,6 +73,46 @@ def write_file(path: Path, content: str, force: bool) -> bool:
     return True
 
 
+def validate_existing_settings(path: Path, target: Path) -> None:
+    """If we skipped writing settings.json, check the existing file's Stop-hook
+    command actually points at this install target. Warn loudly otherwise —
+    a stale absolute path here is the #1 silent-failure mode (no log, no audio,
+    no error)."""
+    try:
+        with path.open(encoding="utf-8") as f:
+            settings = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"  WARNING: could not parse existing {path}: {exc}", file=sys.stderr)
+        return
+
+    stop_hooks = (settings.get("hooks") or {}).get("Stop") or []
+    commands: list[str] = []
+    for group in stop_hooks:
+        for hook in group.get("hooks", []) or []:
+            cmd = hook.get("command")
+            if isinstance(cmd, str):
+                commands.append(cmd)
+
+    if not commands:
+        return  # nothing to validate
+
+    target_str = str(target)
+    target_str_escaped = target_str.replace("\\", "\\\\")
+    for cmd in commands:
+        if "$CLAUDE_PROJECT_DIR" in cmd or "${CLAUDE_PROJECT_DIR}" in cmd:
+            continue  # portable, fine
+        if target_str in cmd or target_str_escaped in cmd:
+            continue  # absolute path matches this target
+        print(
+            "  WARNING: existing Stop-hook command does not reference this install target.\n"
+            f"           command : {cmd}\n"
+            f"           target  : {target_str}\n"
+            "           This will silently fail to play audio. Re-run with --force "
+            "or fix the path in .claude/settings.json by hand.",
+            file=sys.stderr,
+        )
+
+
 def ensure_edge_tts() -> None:
     if importlib.util.find_spec("edge_tts") is not None:
         print("edge-tts already installed.")
@@ -117,7 +157,10 @@ def main(argv: list[str]) -> int:
 
     # .claude/settings.json
     settings_tpl = (TPL_DIR / "settings.json.tmpl").read_text(encoding="utf-8")
-    write_file(target / ".claude" / "settings.json", render(settings_tpl, mapping), args.force)
+    settings_path = target / ".claude" / "settings.json"
+    wrote_settings = write_file(settings_path, render(settings_tpl, mapping), args.force)
+    if not wrote_settings and settings_path.exists():
+        validate_existing_settings(settings_path, target)
 
     # scripts/speak_lang.py — copy verbatim (no substitutions)
     script_src = TPL_DIR / "scripts" / "speak_lang.py"
