@@ -128,6 +128,9 @@ Re-run the installer with `--lang Norwegian`.
 **No audio plays.**
 Check `<target>/logs/speak_lang.log`. Common causes: edge-tts couldn't reach the Microsoft endpoint (firewall), or the assistant's reply has no `<{code}>...</{code}>` tags (the skill stays silent in that case by design).
 
+**No audio plays AND `logs/speak_lang.log` doesn't exist at all.**
+The hook process itself isn't starting — Python is erroring out before it can write a log line. Almost always this means the `command` path in `.claude/settings.json` is wrong (e.g. the project was renamed or copied from a different scaffold). Open `.claude/settings.json` and confirm the path resolves. Recent installs use `$CLAUDE_PROJECT_DIR` so they survive renames; older installs may have an absolute path baked in.
+
 **Audio plays in English.**
 Make sure the assistant actually wrapped its Dutch (or chosen-language) text in the right tags. Open the transcript file referenced by the hook payload and look for `<nl>...</nl>` blocks.
 
