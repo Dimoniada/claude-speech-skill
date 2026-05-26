@@ -312,7 +312,7 @@ This entire path will eventually be automated as `install.py --gpu vulkan` (Phas
 ### As a personal skill
 
 ```powershell
-git clone https://github.com/Dimoniada/claude-speech "$env:USERPROFILE\.claude\skills\claude-speech"
+git clone https://github.com/Dimoniada/claude-speech-skill "$env:USERPROFILE\.claude\skills\claude-speech"
 ```
 
 The skill auto-discovers from `~/.claude/skills/`.
@@ -322,7 +322,7 @@ The skill auto-discovers from `~/.claude/skills/`.
 You can also just clone the repo anywhere and run `install.py` directly:
 
 ```powershell
-git clone https://github.com/Dimoniada/claude-speech D:\Tools\claude-speech
+git clone https://github.com/Dimoniada/claude-speech-skill D:\Tools\claude-speech
 py D:\Tools\claude-speech\install.py --lang Dutch --target D:\Data\my-dutch-project
 ```
 
