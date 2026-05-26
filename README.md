@@ -1,20 +1,27 @@
 # claude-speech
 
-A Claude Code skill that turns any project into a **language-learning workspace** with selective text-to-speech: Claude speaks target-language phrases aloud, English pedagogical notes stay silent.
+A Claude Code skill that turns any project into a **language-learning workspace** with two-way voice:
 
-Unlike whole-response TTS plugins, `claude-speech` reads **only** the text inside language tags, so mixed-language replies (Dutch sentence + English correction) sound natural — you hear the part you're practicing, you read the part that explains it.
+- **Output (TTS)** — Claude speaks target-language phrases aloud, English pedagogical notes stay silent.
+- **Input (F9 push-to-talk)** — hold F9, speak in your target language, release. Local Whisper transcribes, espeak-ng converts to IPA, and your spoken sentence (with phonetic transcription) appears in the chat as your message automatically.
+
+Unlike whole-response TTS plugins, `claude-speech` reads **only** the text inside language tags, so mixed-language replies (Dutch sentence + English correction) sound natural — you hear the part you're practicing, you read the part that explains it. The voice-input side keeps everything local: no audio leaves your machine.
 
 ## How it works
 
-The skill scaffolds three files into your project:
+The skill scaffolds these files into your project:
 
 | File | Role |
 |---|---|
 | `CLAUDE.md` | Teacher persona for the chosen language, with tag rules |
-| `.claude/settings.json` | Stop hook wired to the TTS script |
-| `scripts/speak_lang.py` | Extracts tagged text, synthesizes via `edge-tts`, plays via Windows MCI |
+| `.claude/settings.json` | `Stop` hook (TTS) + `UserPromptSubmit` hook (voice-in fallback) |
+| `scripts/speak_lang.py` | Extracts tagged text from Claude's reply, synthesizes via `edge-tts`, plays via Windows MCI |
+| `scripts/push_to_talk.py` | F9-driven daemon: records mic → Whisper → IPA → pastes into chat |
+| `scripts/inject_transcript.py` | UserPromptSubmit hook that injects the last transcript if auto-paste couldn't focus the chat window |
 
-When Claude finishes a reply, the Stop hook reads the transcript, pulls every `<{code}>...</{code}>` block (where `{code}` is the ISO 639-1 code of the language you're learning), and pipes them to `edge-tts` for playback.
+**Output flow.** When Claude finishes a reply, the Stop hook reads the transcript, pulls every `<{code}>...</{code}>` block (where `{code}` is the ISO 639-1 code of the language you're learning), and pipes them to `edge-tts` for playback.
+
+**Input flow.** The push-to-talk daemon runs in a separate terminal. Hold F9 anywhere (global hotkey, focus-agnostic) → it records 16 kHz mono PCM → release F9 → it calls a local `whisper-cli.exe` to transcribe → then `espeak-ng --ipa` to render IPA → finally focuses your Claude Code window and pastes the two-line `text\n[IPA]` payload + Enter. If window-focus is blocked by Windows 11 anti-focus-stealing, it falls back to writing `recordings/latest_transcript.txt`, and the `UserPromptSubmit` hook injects it on your next manual Enter.
 
 ## The language tag convention
 
@@ -61,6 +68,169 @@ You can also have multiple Dutch utterances in one reply:
 
 Both blocks are concatenated and played back-to-back.
 
+## Voice input (F9 push-to-talk)
+
+After running `install.py` *and* installing the binary deps (see next section), open a separate terminal and start the daemon:
+
+```powershell
+py D:\Data\my-dutch-project\scripts\push_to_talk.py --lang nl
+```
+
+The daemon prints a banner showing which window will receive the auto-paste:
+
+```
+============================================================
+Push-to-talk active for language 'nl' (IPA via espeak-ng voice 'nl').
+Hold F9 anywhere to record. Ctrl+C to quit.
+Auto-submit target (matches for '.*Claude.*'):
+  0. 'Claude'  <- will use
+============================================================
+Hold F9 to record, release to transcribe.
+```
+
+Hold **F9**, speak in your target language, release. After ~1 s on a modest CPU (faster with the optional Vulkan build — see below) your message appears in the chat as two lines: the orthographic text Whisper recognized, plus the IPA in brackets so you can audit your pronunciation. For example, after saying "Ik ga naar de winkel" you'll see:
+
+```
+Ik ga naar de winkel
+[ɪk ɣˈaː naːr də ʋˈɪŋkəl]
+```
+
+### Useful flags
+
+| Flag | Purpose |
+|---|---|
+| `--lang <code>` | Target language. Mirrors `voices.json` codes. Default `en`. |
+| `--hotkey <key>` | Override push-to-talk key. Default `f9`. Examples: `f10`, `f12`. |
+| `--list-windows` | Print all visible top-level window titles and exit. Use to discover the right `--window-title-re`. |
+| `--window-title-re '<regex>'` | Regex matching the Claude Code window to paste into. Default `.*Claude.*`. If multiple windows match, the first is picked — disambiguate with a more specific regex like `^Claude$` or `^Claude-Tutor$`. |
+| `--no-auto-submit` | Skip the auto-paste + Enter. Daemon only writes `recordings/latest_transcript.txt`; the `UserPromptSubmit` hook injects on your manual Enter. Use this if auto-paste keeps targeting the wrong window. |
+| `--espeak-voice <voice>` | Override the espeak-ng voice for IPA. Default derived from `--lang` (e.g. `en` → `en-us`, `zh` → `cmn`). |
+| `--model <path>` | Override the ggml whisper model path. |
+
+### Disabling / stopping the daemon
+
+In a Claude Code session, the skill responds to a control argument:
+
+```
+/claude-speech off
+```
+
+This finds every running `push_to_talk.py` daemon, terminates it, and clears any pending `latest_transcript.txt` so the fallback hook doesn't keep re-injecting stale content. Aliases: `stop`, `kill`.
+
+To re-enable, run `py …\scripts\push_to_talk.py --lang …` in a fresh terminal, or just invoke `/claude-speech <language>` again — the skill auto-spawns the daemon as step 6 of its setup.
+
+## Voice input — binary dependencies
+
+The Python scaffold (`push_to_talk.py`, `inject_transcript.py`) is shipped by `install.py`. The **binary deps are not** — too large for a git repo, and license/distribution rules differ. You provision them yourself, once, into the project's `tools/` directory.
+
+Assuming your project is `D:\Data\my-project`, run the commands below in PowerShell from that directory. The three blocks are independent and can be done in any order.
+
+### 1. whisper.cpp (CPU build) — ~16 MB
+
+```powershell
+$proj = $PWD.Path  # e.g. D:\Data\my-project
+mkdir "$proj\tools\whisper.cpp\bin" -Force | Out-Null
+mkdir "$proj\tools\whisper.cpp\models" -Force | Out-Null
+
+# Download upstream CPU+BLAS release
+$zip = "$proj\tools\whisper.cpp\whisper-blas.zip"
+Invoke-WebRequest -Uri "https://github.com/ggerganov/whisper.cpp/releases/download/v1.8.4/whisper-blas-bin-x64.zip" -OutFile $zip
+Expand-Archive -Path $zip -DestinationPath "$proj\tools\whisper.cpp\bin" -Force
+Remove-Item $zip
+
+# Result: $proj\tools\whisper.cpp\bin\Release\whisper-cli.exe (plus DLLs)
+```
+
+### 2. Whisper model — ~540 MB (multilingual, quantized medium)
+
+```powershell
+Invoke-WebRequest `
+  -Uri "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium-q5_0.bin" `
+  -OutFile "$proj\tools\whisper.cpp\models\ggml-medium-q5_0.bin"
+```
+
+For smaller installs use `ggml-small-q5_1.bin` (~180 MB, English-only-friendly) or `ggml-base.bin` (~150 MB, multilingual but lower accuracy). Pass the chosen path via `--model` when starting the daemon.
+
+### 3. espeak-ng (for IPA conversion) — ~80 MB
+
+The MSI installer normally writes into `C:\Program Files\eSpeak NG\` and the Windows Registry. To keep everything in-project, do an MSI **administrative install** which just extracts the payload:
+
+```powershell
+$msi = "$proj\tools\espeak-ng.msi"
+Invoke-WebRequest -Uri "https://github.com/espeak-ng/espeak-ng/releases/download/1.52.0/espeak-ng.msi" -OutFile $msi
+
+# Admin-extract (no Program Files install, no registry entries)
+Start-Process msiexec.exe `
+  -ArgumentList '/a',('"' + $msi + '"'),'/qn',('TARGETDIR="' + $proj + '\tools\espeak-extract"') `
+  -Wait -NoNewWindow
+
+# Flatten the nested "eSpeak NG" subdir into tools\espeak-ng\
+Move-Item "$proj\tools\espeak-extract\eSpeak NG" "$proj\tools\espeak-ng"
+Remove-Item "$proj\tools\espeak-extract" -Recurse -Force
+Remove-Item $msi
+
+# Sanity check — should print IPA for "transcription"
+$env:ESPEAK_DATA_PATH = "$proj\tools\espeak-ng\espeak-ng-data"
+& "$proj\tools\espeak-ng\espeak-ng.exe" -v en-us --ipa -q "transcription"
+```
+
+The daemon sets `ESPEAK_DATA_PATH` automatically when it shells out to `espeak-ng.exe`; you don't need to keep that env var in your shell.
+
+### Final layout
+
+```
+your-project\
+├── .claude\settings.json
+├── CLAUDE.md
+├── scripts\
+│   ├── speak_lang.py
+│   ├── push_to_talk.py
+│   └── inject_transcript.py
+├── recordings\               (created on first F9 release)
+├── logs\
+└── tools\
+    ├── whisper.cpp\
+    │   ├── bin\Release\whisper-cli.exe  (+ ggml-*.dll, whisper.dll, …)
+    │   └── models\ggml-medium-q5_0.bin
+    └── espeak-ng\
+        ├── espeak-ng.exe
+        ├── libespeak-ng.dll
+        └── espeak-ng-data\
+```
+
+### Optional: Vulkan GPU build (3–5× faster)
+
+For AMD / Intel GPUs (NVIDIA also works), you can build whisper.cpp from source with the Vulkan backend instead of using the upstream CPU/BLAS binary. Inference time drops from ~2 s to ~0.5–1 s per utterance on a modern discrete GPU.
+
+Prerequisites — these are system-wide installs:
+
+```powershell
+winget install --id Microsoft.VisualStudio.2022.BuildTools --silent --accept-source-agreements --accept-package-agreements --override "--quiet --wait --norestart --add Microsoft.VisualStudio.Workload.VCTools --add Microsoft.VisualStudio.Component.Windows11SDK.22621 --add Microsoft.VisualStudio.Component.VC.CMake.Project --includeRecommended"
+winget install --id KhronosGroup.VulkanSDK --silent --accept-source-agreements --accept-package-agreements
+```
+
+Build:
+
+```powershell
+$proj = $PWD.Path
+git clone --depth 1 --branch v1.8.4 https://github.com/ggerganov/whisper.cpp "$proj\tools\whisper.cpp-src"
+
+$env:VULKAN_SDK = (Get-ChildItem "C:\VulkanSDK" | Select-Object -Last 1).FullName
+$cmake = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
+
+cd "$proj\tools\whisper.cpp-src"
+& $cmake -B build -DGGML_VULKAN=ON
+& $cmake --build build --config Release -j
+
+# Replace the CPU binary with the Vulkan one
+Remove-Item "$proj\tools\whisper.cpp\bin\Release" -Recurse -Force
+Copy-Item "$proj\tools\whisper.cpp-src\build\bin\Release" "$proj\tools\whisper.cpp\bin\Release" -Recurse
+```
+
+CMake's configure output should include `-- Found Vulkan` and `-- Including Vulkan backend`. The first run of `whisper-cli.exe` after the swap will print `ggml_vulkan: Found N Vulkan devices: ...` — that's how you know GPU is active.
+
+This entire path will eventually be automated as `install.py --gpu vulkan` (Phase 3 in the roadmap) and then as a pre-built CI binary download (Phase 4). Today it's manual.
+
 ## Installation
 
 ### As a personal skill
@@ -103,9 +273,14 @@ py install.py --lang Spanish --target D:\Data\spanish-practice
 
 # Overwrite existing files
 py install.py --lang Dutch --force
+
+# TTS-only — skip the push-to-talk scripts and their Python deps
+py install.py --lang Dutch --no-voice-in
 ```
 
 After install, open the target directory in Claude Code and start chatting. The first time you say "hi", the assistant greets you in the chosen language and your speakers play the audio.
+
+If you want F9 push-to-talk too, follow the "Voice input — binary dependencies" section above to provision the three binary deps, then run `py …\scripts\push_to_talk.py --lang <code>` in a separate terminal.
 
 ## Adding a new language
 
@@ -140,11 +315,36 @@ Edit `.claude/settings.json` in your target project and change the `--voice` arg
 **Hook fires in every Claude Code session even outside a language project.**
 The Stop hook is scoped to the *project* `.claude/settings.json` — it does not affect other projects unless you also installed it there.
 
+### Voice input
+
+**F9 records but nothing appears in the chat (silent failure).**
+The daemon found the right window and called `set_focus()`, but Windows 11's anti-focus-stealing protection blocked it — so the paste went to whatever was focused. The daemon ships with an "Alt-tap" workaround that fixes this in most cases, plus a foreground-handle verification that aborts if focus didn't actually move. Check `logs/push_to_talk.log` for a line like `foreground window is not target (target=..., fg=...) — aborting`. If you see that, the auto-submit path can't help — use the fallback by manually pressing Enter in the Claude window (the `UserPromptSubmit` hook will inject the transcript), or run with `--no-auto-submit`.
+
+**Auto-submit pastes into the wrong window.**
+The daemon picks the first window matching `--window-title-re` (default `.*Claude.*`). If you have multiple Claude-titled windows (e.g. the Claude Desktop client plus your Claude Code terminal), the first match might not be your chat. Run once with `--list-windows` to see all candidates, then restart with a more specific regex:
+
+```powershell
+py scripts\push_to_talk.py --lang en --window-title-re "^Claude-Tutor$"
+```
+
+**`ERROR: missing dependency '<name>' for this Python interpreter.`**
+You ran the daemon with a different `py` interpreter than the one `install.py` installed deps into. Run the suggested `py -m pip install --user …` line from the error message — it uses the same interpreter as the failing daemon launch.
+
+**`whisper-cli.exe not found` / `espeak-ng.exe not found`.**
+The Python scaffold is set up but the binary deps aren't. Follow the "Voice input — binary dependencies" section above.
+
+**Whisper transcribes the wrong language.**
+Pass `--lang <code>` matching what you're actually speaking. The default is `en`. The model is multilingual; the flag just tells Whisper which language to decode.
+
+**Daemon's terminal shows IPA garbled as `???` or hex.**
+PowerShell defaults to cp1252 codepage. The daemon already forces UTF-8 on stdout via `sys.stdout.reconfigure(encoding='utf-8')`, but if you're piping the daemon's output through another tool that re-encodes, you may need `chcp 65001` in your terminal session.
+
 ## Prerequisites
 
-- **Windows** — playback uses Windows MCI via `ctypes`. Linux/Mac support is a TODO (would swap `play_mp3` for `simpleaudio` or `playsound`).
+- **Windows** — TTS playback uses Windows MCI via `ctypes`; voice-input window automation uses `pywinauto`. Linux/Mac support is a TODO.
 - **Python 3.9+** — `py` launcher should be on PATH.
-- **Internet access** — edge-tts uses Microsoft's online TTS endpoint.
+- **Internet access** — edge-tts uses Microsoft's online TTS endpoint. Voice-input is fully local once binary deps are installed.
+- **For voice-input only** — ~1.5 GB of binary deps you provision manually (whisper.cpp, ~540 MB ggml model, ~80 MB espeak-ng). See "Voice input — binary dependencies".
 
 ## Why not just use an existing TTS plugin?
 

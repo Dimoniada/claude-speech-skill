@@ -1,9 +1,11 @@
 """claude-speech installer.
 
 Scaffolds a language-tutor setup into a target project directory:
-- CLAUDE.md         : teacher persona for the chosen language
-- .claude/settings.json : Stop hook wired to speak_lang.py
-- scripts/speak_lang.py : TTS script
+- CLAUDE.md                     : teacher persona for the chosen language
+- .claude/settings.json         : Stop hook + UserPromptSubmit hook
+- scripts/speak_lang.py         : Stop-hook TTS script (Claude's reply read aloud)
+- scripts/push_to_talk.py       : push-to-talk daemon (record → Whisper → IPA → auto-submit)
+- scripts/inject_transcript.py  : UserPromptSubmit hook (fallback path when auto-submit can't focus the chat window)
 
 Target dir resolution order:
   1. --target argument
@@ -14,6 +16,7 @@ Usage:
     py install.py --lang Dutch
     py install.py --lang German --voice de-DE-ConradNeural
     py install.py --lang Dutch --target D:\\Data\\Claude-TTS --force
+    py install.py --lang Dutch --no-voice-in            # TTS-only, skip voice-in scripts/deps
 """
 from __future__ import annotations
 
@@ -113,12 +116,46 @@ def validate_existing_settings(path: Path, target: Path) -> None:
         )
 
 
-def ensure_edge_tts() -> None:
-    if importlib.util.find_spec("edge_tts") is not None:
-        print("edge-tts already installed.")
+def ensure_pip_packages(packages: list[str], group_label: str) -> None:
+    """pip-install any of `packages` that aren't already importable.
+
+    `packages` are pip distribution names. We map them to import names below
+    where they differ (e.g. pip name 'pywin32' would have import name 'win32api').
+    """
+    pip_to_import = {
+        # pip name -> module name used for find_spec
+        "edge-tts": "edge_tts",
+        "sounddevice": "sounddevice",
+        "scipy": "scipy",
+        "numpy": "numpy",
+        "pynput": "pynput",
+        "pywinauto": "pywinauto",
+        "pyperclip": "pyperclip",
+    }
+    missing = []
+    for pkg in packages:
+        mod = pip_to_import.get(pkg, pkg.replace("-", "_"))
+        if importlib.util.find_spec(mod) is None:
+            missing.append(pkg)
+
+    if not missing:
+        print(f"{group_label}: already installed ({', '.join(packages)}).")
         return
-    print("edge-tts not found — installing via pip --user...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "--user", "edge-tts"])
+
+    print(f"{group_label}: installing {', '.join(missing)} via pip --user ...")
+    subprocess.check_call(
+        [sys.executable, "-m", "pip", "install", "--user", *missing]
+    )
+
+
+# Packages required by the TTS Stop hook (speak_lang.py).
+TTS_DEPS = ["edge-tts"]
+
+# Packages required by the voice-in pipeline (push_to_talk.py + inject_transcript.py).
+# Note: whisper.cpp, the ggml model, and espeak-ng are binary deps — NOT pip
+# installable. The README documents how to provision them manually. This list
+# is only the Python side.
+VOICE_IN_DEPS = ["numpy", "sounddevice", "scipy", "pynput", "pywinauto", "pyperclip"]
 
 
 def main(argv: list[str]) -> int:
@@ -127,7 +164,12 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--voice", help="override edge-tts voice id (otherwise uses the recommended one from voices.json)")
     parser.add_argument("--target", help="target project directory (default: $CLAUDE_PROJECT_DIR or CWD)")
     parser.add_argument("--force", action="store_true", help="overwrite existing files")
-    parser.add_argument("--skip-pip", action="store_true", help="don't try to install edge-tts")
+    parser.add_argument("--skip-pip", action="store_true", help="don't run any pip installs (TTS or voice-in)")
+    parser.add_argument(
+        "--no-voice-in",
+        action="store_true",
+        help="skip the voice-in pipeline (push_to_talk.py, inject_transcript.py, voice-in pip deps). TTS Stop hook is still set up.",
+    )
     args = parser.parse_args(argv)
 
     voices = load_voices()
@@ -162,23 +204,42 @@ def main(argv: list[str]) -> int:
     if not wrote_settings and settings_path.exists():
         validate_existing_settings(settings_path, target)
 
-    # scripts/speak_lang.py — copy verbatim (no substitutions)
-    script_src = TPL_DIR / "scripts" / "speak_lang.py"
-    script_dst = target / "scripts" / "speak_lang.py"
-    if script_dst.exists() and not args.force:
-        print(f"  skip (exists): {script_dst}  [use --force to overwrite]")
-    else:
-        script_dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(script_src, script_dst)
-        print(f"  wrote: {script_dst}")
+    # scripts/ — copy each script verbatim (no template substitutions)
+    scripts_to_copy = ["speak_lang.py"]
+    if not args.no_voice_in:
+        scripts_to_copy.extend(["push_to_talk.py", "inject_transcript.py"])
 
-    # logs/ — pre-create so the script doesn't race on first run
+    for name in scripts_to_copy:
+        script_src = TPL_DIR / "scripts" / name
+        script_dst = target / "scripts" / name
+        if script_dst.exists() and not args.force:
+            print(f"  skip (exists): {script_dst}  [use --force to overwrite]")
+        else:
+            script_dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(script_src, script_dst)
+            print(f"  wrote: {script_dst}")
+
+    # logs/ — pre-create so the scripts don't race on first run
     (target / "logs").mkdir(parents=True, exist_ok=True)
+    # recordings/ — pre-create for push_to_talk.py (no-op if --no-voice-in)
+    if not args.no_voice_in:
+        (target / "recordings").mkdir(parents=True, exist_ok=True)
 
     if not args.skip_pip:
-        ensure_edge_tts()
+        ensure_pip_packages(TTS_DEPS, "TTS deps")
+        if not args.no_voice_in:
+            ensure_pip_packages(VOICE_IN_DEPS, "Voice-in deps")
 
     print(f"\nDone. Open '{target}' in Claude Code and say hi — the assistant will greet you in {entry['name']}.")
+    if not args.no_voice_in:
+        print(
+            "\nVoice-in scaffolded. Before you can use F9 push-to-talk you must also\n"
+            "install the binary dependencies (NOT shipped via pip):\n"
+            "  - whisper.cpp        -> tools/whisper.cpp/bin/Release/whisper-cli.exe\n"
+            "  - whisper model      -> tools/whisper.cpp/models/ggml-medium-q5_0.bin (or similar)\n"
+            "  - espeak-ng (IPA)    -> tools/espeak-ng/espeak-ng.exe\n"
+            "See the README's 'Voice input — binary dependencies' section for exact commands."
+        )
     return 0
 
 
