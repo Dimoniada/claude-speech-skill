@@ -125,6 +125,18 @@ The Python scaffold (`push_to_talk.py`, `inject_transcript.py`) is shipped by `i
 
 Assuming your project is `D:\Data\my-project`, run the commands below in PowerShell from that directory. The three blocks are independent and can be done in any order.
 
+### Picking a whisper.cpp backend
+
+The CPU/BLAS path below is the **default and recommended starting point** — it works on every Windows machine with no extra system software, downloads in seconds, and gives ~2 s end-to-end latency on a modern CPU. Two GPU upgrade paths exist if you want sub-second latency; you'd swap them in after confirming the CPU path works.
+
+| Backend | Hardware | Latency for 5 s of audio | Setup effort | Notes |
+|---|---|---|---|---|
+| **CPU + OpenBLAS** (default) | any x64 CPU | ~1.5–2 s warm | trivial | Pre-built zip from upstream. No drivers, no toolkit. **Start here.** |
+| **CUDA** | NVIDIA GPU | ~0.3–0.8 s warm | low | Pre-built zip from upstream. Requires CUDA Toolkit installed on the box (or use the bundled-cuDNN zip for zero extra installs). |
+| **Vulkan** | any GPU (AMD, Intel, NVIDIA) | ~0.5–1 s warm | high | No pre-built upstream binary — you compile from source. Requires VS Build Tools + Vulkan SDK. Documented at the bottom of this section. |
+
+For most users the right order is: get CPU working first, then upgrade only if the latency annoys you in real use.
+
 ### 1. whisper.cpp (CPU build) — ~16 MB
 
 ```powershell
@@ -198,9 +210,73 @@ your-project\
         └── espeak-ng-data\
 ```
 
-### Optional: Vulkan GPU build (3–5× faster)
+### Optional: CUDA build (NVIDIA GPUs) — easiest GPU path
 
-For AMD / Intel GPUs (NVIDIA also works), you can build whisper.cpp from source with the Vulkan backend instead of using the upstream CPU/BLAS binary. Inference time drops from ~2 s to ~0.5–1 s per utterance on a modern discrete GPU.
+If you have an NVIDIA GPU, the upstream whisper.cpp releases ship pre-built CUDA binaries. **No compile needed** — it's the same drop-in pattern as the CPU build, just a different zip. End-to-end latency drops from ~2 s to ~0.3–0.8 s on a midrange NVIDIA card.
+
+**Step 1 — confirm your CUDA Toolkit version.** Open PowerShell and run:
+
+```powershell
+nvidia-smi
+```
+
+The top-right corner shows a line like `CUDA Version: 12.4`. That number is the **maximum CUDA version your driver supports**, not necessarily what's installed. If it says `12.x`, use the CUDA 12.4 zip below; if it's older (or you specifically have CUDA 11.x installed), use the CUDA 11.8 zip.
+
+If `nvidia-smi` isn't found, you either don't have an NVIDIA GPU or the driver isn't installed. In that case use the CPU path (or the Vulkan path further down for AMD/Intel).
+
+**Step 2 — download and extract.** Pick **one** of these two zips:
+
+```powershell
+$proj = $PWD.Path  # e.g. D:\Data\my-project
+mkdir "$proj\tools\whisper.cpp\bin" -Force | Out-Null
+mkdir "$proj\tools\whisper.cpp\models" -Force | Out-Null
+
+# Wipe the CPU build if you installed it first
+Remove-Item "$proj\tools\whisper.cpp\bin\Release" -Recurse -Force -ErrorAction SilentlyContinue
+
+$zip = "$proj\tools\whisper.cpp\whisper-cublas.zip"
+
+# Option A — CUDA 12.4, ~457 MB (BUNDLES cuDNN — nothing else to install)
+Invoke-WebRequest -Uri "https://github.com/ggerganov/whisper.cpp/releases/download/v1.8.4/whisper-cublas-12.4.0-bin-x64.zip" -OutFile $zip
+
+# Option B — CUDA 11.8, ~58 MB (you must install cuDNN separately, see Step 3)
+# Invoke-WebRequest -Uri "https://github.com/ggerganov/whisper.cpp/releases/download/v1.8.4/whisper-cublas-11.8.0-bin-x64.zip" -OutFile $zip
+
+Expand-Archive -Path $zip -DestinationPath "$proj\tools\whisper.cpp\bin" -Force
+Remove-Item $zip
+# Result: $proj\tools\whisper.cpp\bin\Release\whisper-cli.exe with CUDA support
+```
+
+**Step 3 — install cuDNN (Option B only).** The CUDA 12.4 zip already bundles cuDNN, so skip this step if you used Option A. For Option B (CUDA 11.8), you need cuDNN's runtime libraries. The simplest way is to pip-install the bundled wheels into the same Python the daemon uses:
+
+```powershell
+py -m pip install --user nvidia-cublas-cu11 nvidia-cudnn-cu11
+```
+
+Alternatively, download cuDNN 8.x for CUDA 11 from [developer.nvidia.com/cudnn](https://developer.nvidia.com/cudnn-downloads) and copy `cudnn*.dll` next to `whisper-cli.exe`.
+
+**Step 4 — verify.** Run the binary against any 16 kHz WAV:
+
+```powershell
+& "$proj\tools\whisper.cpp\bin\Release\whisper-cli.exe" `
+    -m "$proj\tools\whisper.cpp\models\ggml-medium-q5_0.bin" `
+    -f any_16khz.wav -l en -nt -np
+```
+
+On the first run it should print a line like:
+
+```
+ggml_cuda_init: found 1 CUDA devices:
+  Device 0: NVIDIA GeForce RTX 4070, compute capability 8.9, VMM: yes
+```
+
+That's how you know CUDA is active. If you see no such line (or you see `ggml_vulkan: …` from a leftover Vulkan build), the swap didn't take — re-check the zip extracted to the right path.
+
+If `whisper-cli.exe` fails to start with `Could not load library cudnn_ops_infer64_*.dll` or similar, cuDNN isn't on the DLL search path. Re-do Step 3, or fall back to Option A which bundles it.
+
+### Optional: Vulkan build (any GPU) — for AMD/Intel, or NVIDIA users who prefer it
+
+If you're on AMD or Intel (where the CUDA path doesn't apply) — or you're on NVIDIA but prefer Vulkan — you can build whisper.cpp from source with the Vulkan backend. Inference drops from ~2 s to ~0.5–1 s per utterance on a modern discrete GPU. Unlike CUDA, there's **no pre-built upstream binary** for Vulkan, so you compile from source.
 
 Prerequisites — these are system-wide installs:
 
