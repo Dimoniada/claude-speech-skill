@@ -148,6 +148,4 @@ F9 held → record 16kHz mono WAV
 
 ## Out of scope / follow-ups
 
-- Pre-existing bug: the Mandarin Chinese entry in `voices.json` has a Russian
-  `voice` (`ru-RU-SvetlanaNeural`). Fix separately.
 - Phase 2+ binary-dep auto-download and GPU build pipeline (tracked elsewhere).
