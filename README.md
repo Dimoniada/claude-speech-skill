@@ -138,7 +138,7 @@ This prints every input and output device with its index, name, and host API (MM
   ```
 - **Speaker/headphone (output):** pass `--output-device` to the **installer**, which bakes it into the Stop hook in `.claude/settings.json`:
   ```powershell
-  py install.py --lang Dutch --common Russian --output-device "Headphones"
+  py install.py --target Dutch --common Russian --output-device "Headphones"
   ```
   When an output device is chosen, TTS no longer plays through the dependency-free Windows MCI path; instead the edge-tts MP3 is decoded with [`miniaudio`](https://pypi.org/project/miniaudio/) and played via `sounddevice` on that endpoint. The installer pip-installs `miniaudio` automatically in that case. With no `--output-device`, nothing changes — playback stays on MCI and the system default.
 
@@ -364,7 +364,7 @@ You can also just clone the repo anywhere and run `install.py` directly:
 
 ```powershell
 git clone https://github.com/Dimoniada/claude-speech-skill D:\Tools\claude-speech
-py D:\Tools\claude-speech\install.py --lang Dutch --common Russian --target D:\Data\my-dutch-project
+py D:\Tools\claude-speech\install.py --target Dutch --common Russian --project-dir D:\Data\my-dutch-project
 ```
 
 ## Usage
@@ -374,28 +374,30 @@ py D:\Tools\claude-speech\install.py --lang Dutch --common Russian --target D:\D
 Invoke the skill and tell Claude:
 > "Set up a Dutch tutor here."
 
-Claude will resolve the target directory from `$CLAUDE_PROJECT_DIR` (Claude Code sets this automatically per session), confirm with you, and run the installer.
+Claude will resolve the project directory from `$CLAUDE_PROJECT_DIR` (Claude Code sets this automatically per session), confirm with you, and run the installer.
 
 ### Manually
 
+`--target` is the target **language**; the scaffold destination is `--project-dir` (`--lang` is still accepted as a hidden alias for `--target`).
+
 ```powershell
 # Default voice
-py install.py --lang Dutch --common Russian
+py install.py --target Dutch --common Russian
 
 # Override voice
-py install.py --lang German --common Russian --voice de-DE-ConradNeural
+py install.py --target German --common Russian --voice de-DE-ConradNeural
 
-# Explicit target dir (otherwise $CLAUDE_PROJECT_DIR, otherwise CWD)
-py install.py --lang Spanish --common Russian --target D:\Data\spanish-practice
+# Explicit project dir (otherwise $CLAUDE_PROJECT_DIR, otherwise CWD)
+py install.py --target Spanish --common Russian --project-dir D:\Data\spanish-practice
 
 # Overwrite existing files
-py install.py --lang Dutch --common Russian --force
+py install.py --target Dutch --common Russian --force
 
 # TTS-only — skip the push-to-talk scripts and their Python deps
-py install.py --lang Dutch --common Russian --no-voice-in
+py install.py --target Dutch --common Russian --no-voice-in
 ```
 
-After install, open the target directory in Claude Code and start chatting. The first time you say "hi", the assistant greets you in the chosen language and your speakers play the audio.
+After install, open the project directory in Claude Code and start chatting. The first time you say "hi", the assistant greets you in the chosen language and your speakers play the audio.
 
 If you want push-to-talk too, follow the "Voice input — binary dependencies" section above to provision the three binary deps, then run `py …\scripts\push_to_talk.py --target <code> --common <code>` in a separate terminal.
 
@@ -413,7 +415,7 @@ Add an entry:
 {"name": "Norwegian", "code": "no", "iso": "nb-NO", "voice": "nb-NO-PernilleNeural"}
 ```
 
-Re-run the installer with `--lang Norwegian --common <your-language>`.
+Re-run the installer with `--target Norwegian --common <your-language>`.
 
 ## Troubleshooting
 

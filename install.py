@@ -7,16 +7,20 @@ Scaffolds a language-tutor setup into a target project directory:
 - scripts/push_to_talk.py       : push-to-talk daemon (record → Whisper → IPA → auto-submit)
 - scripts/inject_transcript.py  : UserPromptSubmit hook (fallback path when auto-submit can't focus the chat window)
 
-Target dir resolution order:
-  1. --target argument
+Project dir resolution order:
+  1. --project-dir argument
   2. $CLAUDE_PROJECT_DIR environment variable
   3. current working directory
 
 Usage:
-    py install.py --lang Dutch --common Russian
-    py install.py --lang German --common Russian --voice de-DE-ConradNeural
-    py install.py --lang Dutch --common Russian --target D:\\Data\\Claude-TTS --force
-    py install.py --lang Dutch --common Russian --no-voice-in   # TTS-only, skip voice-in
+    py install.py --target Dutch --common Russian
+    py install.py --target German --common Russian --voice de-DE-ConradNeural
+    py install.py --target Dutch --common Russian --project-dir D:\\Data\\Claude-TTS --force
+    py install.py --target Dutch --common Russian --no-voice-in   # TTS-only, skip voice-in
+
+Note: --target is the target LANGUAGE (the daemon uses the same name); the
+scaffold destination is --project-dir. --lang is accepted as a hidden alias
+for --target for backward compatibility.
 """
 from __future__ import annotations
 
@@ -167,7 +171,8 @@ OUTPUT_DEVICE_DEPS = ["miniaudio", "numpy", "sounddevice"]
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description="claude-speech installer")
-    parser.add_argument("--lang", required=True, help="target language being learned: name (e.g. Dutch) or ISO 639-1 code (e.g. nl)")
+    parser.add_argument("--target", help="target language being learned: name (e.g. Dutch) or ISO 639-1 code (e.g. nl)")
+    parser.add_argument("--lang", help=argparse.SUPPRESS)  # back-compat alias for --target
     parser.add_argument("--common", required=True, help="communication language for notes/corrections: name (e.g. Russian) or ISO 639-1 code (e.g. ru)")
     parser.add_argument("--voice", help="override edge-tts voice id (otherwise uses the recommended one from voices.json)")
     parser.add_argument(
@@ -178,7 +183,7 @@ def main(argv: list[str]) -> int:
         "--output-device",
         help="speaker/headphone for TTS playback: device index or a name substring. Baked into the Stop hook in settings.json. List options with: py scripts/speak_lang.py --list-devices",
     )
-    parser.add_argument("--target", help="target project directory (default: $CLAUDE_PROJECT_DIR or CWD)")
+    parser.add_argument("--project-dir", dest="project_dir", help="project directory to scaffold into (default: $CLAUDE_PROJECT_DIR or CWD)")
     parser.add_argument("--force", action="store_true", help="overwrite existing files")
     parser.add_argument("--skip-pip", action="store_true", help="don't run any pip installs (TTS or voice-in)")
     parser.add_argument(
@@ -191,9 +196,14 @@ def main(argv: list[str]) -> int:
     voices = load_voices()
     available = ", ".join(f"{v['name']} ({v['code']})" for v in voices)
 
-    entry = find_language(voices, args.lang)
+    target_lang = args.target or args.lang
+    if not target_lang:
+        print("ERROR: no target language given; pass --target <name|code> (e.g. --target Dutch).", file=sys.stderr)
+        return 2
+
+    entry = find_language(voices, target_lang)
     if entry is None:
-        print(f"ERROR: unknown target language '{args.lang}'.\nAvailable: {available}", file=sys.stderr)
+        print(f"ERROR: unknown target language '{target_lang}'.\nAvailable: {available}", file=sys.stderr)
         return 2
 
     common_entry = find_language(voices, args.common)
@@ -208,7 +218,7 @@ def main(argv: list[str]) -> int:
         )
         return 2
 
-    target = resolve_target(args.target)
+    project_dir = resolve_target(args.project_dir)
     voice = args.voice or entry["voice"]
 
     # Bake the chosen output device into the Stop-hook command in settings.json.
@@ -229,25 +239,25 @@ def main(argv: list[str]) -> int:
         "COMMON_CODE": common_entry["code"],
         "COMMON_ISO": common_entry["iso"],
         "OUTPUT_DEVICE_ARG": output_device_arg,
-        "TARGET": str(target).replace("\\", "\\\\"),  # JSON-safe path
+        "TARGET": str(project_dir).replace("\\", "\\\\"),  # JSON-safe path
     }
 
     print(
         f"Scaffolding target {entry['name']} ({entry['code']}, voice {voice}) "
-        f"+ common {common_entry['name']} ({common_entry['code']}) into:\n  {target}\n"
+        f"+ common {common_entry['name']} ({common_entry['code']}) into:\n  {project_dir}\n"
     )
-    target.mkdir(parents=True, exist_ok=True)
+    project_dir.mkdir(parents=True, exist_ok=True)
 
     # CLAUDE.md
     claude_md_tpl = (TPL_DIR / "CLAUDE.md.tmpl").read_text(encoding="utf-8")
-    write_file(target / "CLAUDE.md", render(claude_md_tpl, mapping), args.force)
+    write_file(project_dir / "CLAUDE.md", render(claude_md_tpl, mapping), args.force)
 
     # .claude/settings.json
     settings_tpl = (TPL_DIR / "settings.json.tmpl").read_text(encoding="utf-8")
-    settings_path = target / ".claude" / "settings.json"
+    settings_path = project_dir / ".claude" / "settings.json"
     wrote_settings = write_file(settings_path, render(settings_tpl, mapping), args.force)
     if not wrote_settings and settings_path.exists():
-        validate_existing_settings(settings_path, target)
+        validate_existing_settings(settings_path, project_dir)
 
     # scripts/ — copy each script verbatim (no template substitutions)
     scripts_to_copy = ["speak_lang.py"]
@@ -256,7 +266,7 @@ def main(argv: list[str]) -> int:
 
     for name in scripts_to_copy:
         script_src = TPL_DIR / "scripts" / name
-        script_dst = target / "scripts" / name
+        script_dst = project_dir / "scripts" / name
         if script_dst.exists() and not args.force:
             print(f"  skip (exists): {script_dst}  [use --force to overwrite]")
         else:
@@ -265,10 +275,10 @@ def main(argv: list[str]) -> int:
             print(f"  wrote: {script_dst}")
 
     # logs/ — pre-create so the scripts don't race on first run
-    (target / "logs").mkdir(parents=True, exist_ok=True)
+    (project_dir / "logs").mkdir(parents=True, exist_ok=True)
     # recordings/ — pre-create for push_to_talk.py (no-op if --no-voice-in)
     if not args.no_voice_in:
-        (target / "recordings").mkdir(parents=True, exist_ok=True)
+        (project_dir / "recordings").mkdir(parents=True, exist_ok=True)
 
     if not args.skip_pip:
         ensure_pip_packages(TTS_DEPS, "TTS deps")
@@ -280,7 +290,7 @@ def main(argv: list[str]) -> int:
             ensure_pip_packages(OUTPUT_DEVICE_DEPS, "Output-device deps")
 
     print(
-        f"\nDone. Open '{target}' in Claude Code and say hi — the assistant will greet you in "
+        f"\nDone. Open '{project_dir}' in Claude Code and say hi — the assistant will greet you in "
         f"{entry['name']} and write its notes in {common_entry['name']}."
     )
     if not args.no_voice_in:

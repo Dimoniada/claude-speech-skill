@@ -53,9 +53,9 @@ Trigger when the user says any of:
 
 5. **Run the installer** (from this skill's directory), passing the output device chosen in step 3:
    ```
-   py install.py --lang <target> --common <common> --output-device "<name|index>" [--voice <voice-id>] [--target <dir>] [--force] [--no-voice-in]
+   py install.py --target <target> --common <common> --output-device "<name|index>" [--voice <voice-id>] [--project-dir <dir>] [--force] [--no-voice-in]
    ```
-   Note: `--lang` is the target language and `--common` is the communication language; `--target` (if used) is the output *directory*, not a language. `--output-device` is the speaker chosen in step 3 (required by this skill's flow) and is baked into the Stop hook in `.claude/settings.json`. This writes `CLAUDE.md`, `.claude/settings.json`, `scripts/speak_lang.py`, `scripts/push_to_talk.py`, and `scripts/inject_transcript.py` into the target. It also pip-installs `edge-tts`, the voice-in deps (`numpy sounddevice scipy pynput pywinauto pyperclip`), and `miniaudio` (for output-device playback) if missing. Pass `--no-voice-in` to skip the push-to-talk pieces (TTS-only setup — then only the output device is needed).
+   Note: `--target` is the target **language** (same name the daemon uses) and `--common` is the communication language; the scaffold **destination** is `--project-dir`, not `--target`. (`--lang` is still accepted as a hidden alias for `--target`.) `--output-device` is the speaker chosen in step 3 (required by this skill's flow) and is baked into the Stop hook in `.claude/settings.json`. This writes `CLAUDE.md`, `.claude/settings.json`, `scripts/speak_lang.py`, `scripts/push_to_talk.py`, and `scripts/inject_transcript.py` into the project dir. It also pip-installs `edge-tts`, the voice-in deps (`numpy sounddevice scipy pynput pywinauto pyperclip`), and `miniaudio` (for output-device playback) if missing. Pass `--no-voice-in` to skip the push-to-talk pieces (TTS-only setup — then only the output device is needed).
 
 6. **Confirm next steps** with the user: open the target dir in a fresh Claude Code session (or reload `/config` if already inside), then say hi — the assistant will greet them in the target language (with notes in the common language) using the agreed tag convention.
 
