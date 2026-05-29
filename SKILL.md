@@ -1,6 +1,6 @@
 ---
 name: claude-speech
-description: Scaffold a language tutor in any project — Claude speaks target-language phrases aloud while English notes stay silent. Use when the user asks to learn or practice a foreign language with spoken feedback, or when they want Claude's non-English responses read aloud in Claude Code.
+description: Scaffold a two-language tutor in any project — Claude speaks the target language aloud (with IPA) while notes and corrections in your native language stay silent. Use when the user asks to learn or practice a foreign language with spoken feedback, or when they want Claude's target-language responses read aloud in Claude Code.
 ---
 
 # claude-speech
@@ -67,7 +67,7 @@ Trigger when the user says any of:
 
 ## Tag convention
 
-Generated `CLAUDE.md` instructs the assistant to wrap every target-language utterance in `<{code}>...</{code}>` tags (where `{code}` is the ISO 639-1 code: `<nl>`, `<de>`, `<es>`, etc.). The Stop hook extracts only that content and sends it to TTS. Anything outside the tags — English pedagogical notes, corrections, follow-up questions — stays silent and only appears as text.
+Generated `CLAUDE.md` instructs the assistant to wrap every target-language utterance in `<{code}>...</{code}>` tags (where `{code}` is the ISO 639-1 code: `<nl>`, `<de>`, `<es>`, etc.). The Stop hook extracts only that content and sends it to TTS. Anything outside the tags — pedagogical notes, corrections, and follow-up questions written in the common (native) language — stays silent and only appears as text.
 
 ## Adding a new language
 
