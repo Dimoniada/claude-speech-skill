@@ -9,6 +9,7 @@ don't use the configured tag stay quiet.
 
 Usage (wired into .claude/settings.json):
     py speak_lang.py --voice nl-NL-FennaNeural --tag nl [--rate -10%]
+    py speak_lang.py --voice nl-NL-FennaNeural --tag nl --output-device "Headphones"
 """
 from __future__ import annotations
 
@@ -95,8 +96,12 @@ async def synthesize(text: str, voice: str, rate: str, out_path: Path) -> None:
     await communicate.save(str(out_path))
 
 
-def play_mp3(path: Path) -> None:
-    """Synchronous MP3 playback via Windows MCI (no extra deps)."""
+def play_mp3_mci(path: Path) -> None:
+    """Synchronous MP3 playback via Windows MCI (no extra deps).
+
+    Always uses the system default output device — MCI has no clean way to
+    route to a specific endpoint. Used when no --output-device is requested.
+    """
     alias = f"snd_{int(time.time() * 1000)}"
     buf = c_buffer(255)
     mci = ctypes.windll.winmm.mciSendStringW
@@ -109,17 +114,114 @@ def play_mp3(path: Path) -> None:
         mci(f"close {alias}", buf, 254, 0)
 
 
+def resolve_output_device(spec: str | None) -> int | None:
+    """Resolve an output-device spec (index or name substring) to an index.
+
+    Returns None for an empty spec (caller uses MCI / system default). Device
+    indices are not stable across reboots, so a name substring is preferred.
+    Raises ValueError on an invalid index or a name that matches nothing.
+    Logs and picks the lowest index when a name matches several endpoints
+    (the same hardware is usually exposed once per host API).
+    """
+    if not spec:
+        return None
+    import sounddevice as sd
+    spec = str(spec).strip()
+    devices = sd.query_devices()
+    if spec.isdigit():
+        idx = int(spec)
+        if idx < 0 or idx >= len(devices):
+            raise ValueError(f"output device index {idx} out of range (0..{len(devices) - 1})")
+        if devices[idx]["max_output_channels"] <= 0:
+            raise ValueError(f"device [{idx}] {devices[idx]['name']!r} has no output channels")
+        return idx
+    needle = spec.lower()
+    matches = [
+        i for i, d in enumerate(devices)
+        if d["max_output_channels"] > 0 and needle in d["name"].lower()
+    ]
+    if not matches:
+        raise ValueError(f"no output device name contains {spec!r}")
+    if len(matches) > 1:
+        alts = ", ".join(f"[{i}] {devices[i]['name']}" for i in matches)
+        logging.info("output device %r matched several; using lowest index. Candidates: %s", spec, alts)
+    return matches[0]
+
+
+def play_mp3_sounddevice(path: Path, device: int) -> None:
+    """Decode the MP3 to PCM (miniaudio) and play it on a specific output
+    device via sounddevice. Blocks until playback finishes."""
+    import miniaudio
+    import numpy as np
+    import sounddevice as sd
+
+    decoded = miniaudio.decode_file(str(path))  # int16 PCM at the file's native rate
+    samples = np.frombuffer(bytes(decoded.samples), dtype=np.int16)
+    if decoded.nchannels > 1:
+        samples = samples.reshape(-1, decoded.nchannels)
+    sd.play(samples, decoded.sample_rate, device=device)
+    sd.wait()
+
+
+def play_mp3(path: Path, output_device: int | None) -> None:
+    """Play an MP3 file. Uses sounddevice (specific endpoint) when an output
+    device is given, otherwise the dependency-free Windows MCI default path."""
+    if output_device is None:
+        play_mp3_mci(path)
+    else:
+        play_mp3_sounddevice(path, output_device)
+
+
+def format_device_list() -> str:
+    """Human-readable listing of output audio devices (for --list-devices)."""
+    import sounddevice as sd
+    lines = ["Output devices (speakers/headphones — for TTS playback):"]
+    for i, d in enumerate(sd.query_devices()):
+        if d["max_output_channels"] > 0:
+            host = sd.query_hostapis(d["hostapi"])["name"]
+            lines.append(f"  [{i}] {d['name']}  (out={d['max_output_channels']}, {host})")
+    return "\n".join(lines)
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="claude-speech Stop-hook TTS")
-    parser.add_argument("--voice", required=True, help="edge-tts voice id (e.g. nl-NL-FennaNeural)")
-    parser.add_argument("--tag", required=True, help="lowercase tag (e.g. nl, de, es) — extracts <tag>...</tag>")
+    # --voice/--tag are required for playback but not for --list-devices, so
+    # they are validated in main() rather than marked required here.
+    parser.add_argument("--voice", help="edge-tts voice id (e.g. nl-NL-FennaNeural)")
+    parser.add_argument("--tag", help="lowercase tag (e.g. nl, de, es) — extracts <tag>...</tag>")
     parser.add_argument("--rate", default=DEFAULT_RATE, help="edge-tts rate string, e.g. -10%% or +5%%")
+    parser.add_argument(
+        "--output-device",
+        default=None,
+        help="speaker/headphone to play TTS on: device index or a substring of its name (default: system default via MCI). See --list-devices.",
+    )
+    parser.add_argument(
+        "--list-devices",
+        action="store_true",
+        help="print available audio output devices and exit",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
+
+    if args.list_devices:
+        print(format_device_list())
+        return 0
+
     setup_logging()
+
+    if not args.voice or not args.tag:
+        logging.error("--voice and --tag are required for playback")
+        return 0
+
+    try:
+        output_device = resolve_output_device(args.output_device)
+    except ValueError as exc:
+        logging.error("output device: %s", exc)
+        return 0
+
     try:
         payload = json.load(sys.stdin)
     except json.JSONDecodeError as exc:
@@ -143,7 +245,7 @@ def main(argv: list[str]) -> int:
         out = Path(tmp.name)
     try:
         asyncio.run(synthesize(text, args.voice, args.rate, out))
-        play_mp3(out)
+        play_mp3(out, output_device)
     except Exception as exc:
         logging.exception("TTS failed: %s", exc)
         return 0

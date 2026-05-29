@@ -1,26 +1,37 @@
-"""Push-to-talk Dutch/English/etc. voice input for Claude-Tutor.
+"""Push-to-talk two-language voice input for Claude-Tutor.
+
+Supports a TARGET language (the one being learned) and a COMMON language
+(your native/communication tongue). You pick the language by which key you
+hold — there is NO language auto-detection, so mixed-language speech (e.g.
+Dutch words inside a Russian sentence) is transcribed in the language you
+intended rather than guessed.
 
 Loops forever:
-  1. Wait for the configured hotkey to be pressed (default F9).
-  2. While the hotkey is held, capture mono 16 kHz audio from the default mic.
-  3. On release, save the recording as recordings/rec_{lang}_{NNNN:04d}.wav.
-  4. Transcribe via whisper.cpp (whisper-cli) for the target language.
-  5. Overwrite recordings/latest_transcript.txt with the transcribed text.
+  1. Wait for one of two hotkeys: the target key (default F9) or the common
+     key (default F10).
+  2. While the key is held, capture mono 16 kHz audio from the default mic.
+  3. On release, transcribe via whisper.cpp (whisper-cli) forcing the language
+     bound to the key you held.
+  4. If you held the target key, append an IPA pronunciation line; if you held
+     the common key, keep plain text.
+  5. Save the recording as recordings/rec_{lang}_{NNNN:04d}.wav.
+  6. Overwrite recordings/latest_transcript.txt with the payload.
 
 The companion UserPromptSubmit hook (inject_transcript.py) reads
 latest_transcript.txt on every Enter you press in Claude Code and
 prepends it as context to your next prompt.
 
 Usage (from a separate terminal, leave it running):
-    py push_to_talk.py --lang en
-    py push_to_talk.py --lang nl --hotkey f10
-    py push_to_talk.py --lang en --model D:\\Tools\\whisper.cpp\\models\\ggml-small-q5_1.bin
+    py push_to_talk.py --target nl --common ru
+    py push_to_talk.py --target nl --common ru --target-hotkey f9 --common-hotkey f10
+    py push_to_talk.py --target nl --common ru --model D:\\...\\ggml-small-q5_1.bin
 
 Press Ctrl+C in this terminal to stop.
 """
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import re
 import subprocess
@@ -61,8 +72,9 @@ except ImportError as _exc:
     )
     sys.exit(2)
 
-import os    # noqa: E402
-import time  # noqa: E402  (kept after the dep-check block for clearer error UX)
+import ctypes  # noqa: E402
+import os       # noqa: E402
+import time     # noqa: E402  (kept after the dep-check block for clearer error UX)
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
@@ -79,7 +91,8 @@ ESPEAK_DIR = PROJECT_ROOT / "tools" / "espeak-ng"
 DEFAULT_ESPEAK_NG = ESPEAK_DIR / "espeak-ng.exe"
 DEFAULT_ESPEAK_DATA = ESPEAK_DIR / "espeak-ng-data"
 
-DEFAULT_HOTKEY = "f9"
+DEFAULT_TARGET_HOTKEY = "f9"   # hold to speak the TARGET language (+IPA)
+DEFAULT_COMMON_HOTKEY = "f10"  # hold to speak the COMMON language (text only)
 DEFAULT_WINDOW_TITLE_RE = r".*Claude.*"
 
 # Map our ISO 639-1 codes to espeak-ng voice names. Codes not listed here
@@ -114,6 +127,62 @@ def resolve_hotkey(name: str) -> keyboard.Key | keyboard.KeyCode:
     raise ValueError(f"unknown hotkey: {name!r}")
 
 
+def format_device_list() -> str:
+    """Return a human-readable listing of input and output audio devices."""
+    lines = ["Input devices (microphones — for push-to-talk):"]
+    for i, d in enumerate(sd.query_devices()):
+        if d["max_input_channels"] > 0:
+            host = sd.query_hostapis(d["hostapi"])["name"]
+            lines.append(f"  [{i}] {d['name']}  (in={d['max_input_channels']}, {host})")
+    lines.append("Output devices (speakers/headphones — for TTS playback):")
+    for i, d in enumerate(sd.query_devices()):
+        if d["max_output_channels"] > 0:
+            host = sd.query_hostapis(d["hostapi"])["name"]
+            lines.append(f"  [{i}] {d['name']}  (out={d['max_output_channels']}, {host})")
+    return "\n".join(lines)
+
+
+def resolve_audio_device(spec: str | None, want_input: bool) -> int | None:
+    """Resolve a device spec to a sounddevice device index.
+
+    `spec` may be a device index ("9") or a case-insensitive substring of the
+    device name ("USB PnP"). Names are preferred in practice because device
+    *indices* are not stable across reboots or replugs, while the name is.
+
+    Returns None when `spec` is empty (caller should use the system default).
+    Raises ValueError when an index is invalid or a name matches nothing.
+    When a name matches several devices (the same hardware is usually exposed
+    once per host API — MME, DirectSound, WASAPI, …) the lowest index is used
+    and the alternatives are logged.
+    """
+    if not spec:
+        return None
+    spec = str(spec).strip()
+    devices = sd.query_devices()
+    chan_key = "max_input_channels" if want_input else "max_output_channels"
+    kind = "input" if want_input else "output"
+
+    if spec.isdigit():
+        idx = int(spec)
+        if idx < 0 or idx >= len(devices):
+            raise ValueError(f"device index {idx} out of range (0..{len(devices) - 1})")
+        if devices[idx][chan_key] <= 0:
+            raise ValueError(f"device [{idx}] {devices[idx]['name']!r} has no {kind} channels")
+        return idx
+
+    needle = spec.lower()
+    matches = [
+        i for i, d in enumerate(devices)
+        if d[chan_key] > 0 and needle in d["name"].lower()
+    ]
+    if not matches:
+        raise ValueError(f"no {kind} device name contains {spec!r} (try --list-devices)")
+    if len(matches) > 1:
+        alts = ", ".join(f"[{i}] {devices[i]['name']}" for i in matches)
+        logging.info("%s device %r matched several; using lowest index. Candidates: %s", kind, spec, alts)
+    return matches[0]
+
+
 def next_sequence_number(lang: str) -> int:
     """Find the next NNNN for rec_{lang}_NNNN.wav in RECORDINGS_DIR."""
     pattern = re.compile(rf"^rec_{re.escape(lang)}_(\d+)\.wav$", re.IGNORECASE)
@@ -126,42 +195,51 @@ def next_sequence_number(lang: str) -> int:
     return highest + 1
 
 
-def record_until_release(hotkey: keyboard.Key | keyboard.KeyCode) -> np.ndarray | None:
-    """Block until the hotkey is pressed, capture audio while held, return the
-    audio buffer as int16. Returns None if the hotkey was tapped without
-    producing any audio (or release came before any sample arrived)."""
+def record_until_release(hotkeys: dict, input_device: int | None = None) -> tuple[np.ndarray | None, str | None]:
+    """Wait until one of several hotkeys is pressed, capture audio while it is
+    held, then return (audio_int16, label) where `label` is the value mapped to
+    the pressed key in `hotkeys` (here, the forced language code).
+
+    `hotkeys` maps a pynput Key/KeyCode -> label string. Only the first key
+    pressed is honored until it is released, so holding two at once is safe.
+    `input_device` is a sounddevice device index, or None for the system
+    default microphone.
+    Returns (None, label) if the key was tapped without producing audio.
+    """
     chunks: list[np.ndarray] = []
     recording = threading.Event()
     stop_signal = threading.Event()
+    pressed: dict[str, object] = {"key": None}
 
     def audio_cb(indata, frames, time_info, status):  # noqa: ANN001
         if recording.is_set():
             chunks.append(indata.copy())
 
     def on_press(key):
-        if key == hotkey and not recording.is_set():
+        if key in hotkeys and not recording.is_set():
+            pressed["key"] = key
             recording.set()
-            print(f"  [recording...]", flush=True)
+            print(f"  [recording '{hotkeys[key]}'...]", flush=True)
 
     def on_release(key):
-        if key == hotkey and recording.is_set():
+        if recording.is_set() and key == pressed["key"]:
             recording.clear()
             stop_signal.set()
             return False  # stop the listener
 
-    print(f"Hold {format_hotkey_name(hotkey)} to record, release to transcribe.", flush=True)
-
     with sd.InputStream(
-        samplerate=SAMPLE_RATE, channels=1, dtype="int16", callback=audio_cb
+        samplerate=SAMPLE_RATE, channels=1, dtype="int16",
+        device=input_device, callback=audio_cb,
     ):
         listener = keyboard.Listener(on_press=on_press, on_release=on_release)
         listener.start()
         stop_signal.wait()
         listener.stop()
 
+    label = hotkeys.get(pressed["key"])
     if not chunks:
-        return None
-    return np.concatenate(chunks, axis=0)
+        return None, label
+    return np.concatenate(chunks, axis=0), label
 
 
 def format_hotkey_name(hotkey: keyboard.Key | keyboard.KeyCode) -> str:
@@ -170,10 +248,40 @@ def format_hotkey_name(hotkey: keyboard.Key | keyboard.KeyCode) -> str:
     return repr(hotkey.char) if hotkey.char else repr(hotkey)
 
 
+def parse_whisper_json(json_text: str) -> tuple[str, str]:
+    """Extract (transcription_text, detected_lang_code) from whisper-cli JSON.
+
+    whisper.cpp's -oj output looks like:
+        {"result": {"language": "ru"},
+         "transcription": [{"text": " ..."}, ...]}
+    Returns ("", "") if the structure is missing/unparseable.
+    """
+    try:
+        data = json.loads(json_text)
+    except (json.JSONDecodeError, TypeError):
+        return "", ""
+    lang = ((data.get("result") or {}).get("language") or "").strip()
+    segments = data.get("transcription") or []
+    text = " ".join(
+        (seg.get("text") or "").strip()
+        for seg in segments
+        if isinstance(seg, dict)
+    ).strip()
+    return text, lang
+
+
 def run_whisper(
     wav_path: Path, lang: str, model: Path, whisper_cli: Path
-) -> str:
-    """Invoke whisper-cli, return the transcribed text (stripped)."""
+) -> tuple[str, str]:
+    """Invoke whisper-cli; return (transcribed_text, detected_lang_code).
+
+    `lang` may be "auto" to let whisper detect the language, or an ISO code to
+    force it. The detected/forced language and text are read from whisper's
+    JSON output (-oj), which is more reliable than parsing stderr. Stdout is
+    used as a fallback for the text if the JSON is missing.
+    """
+    out_prefix = wav_path.with_suffix("")        # whisper appends ".json"
+    json_path = wav_path.with_suffix(".json")
     cmd = [
         str(whisper_cli),
         "-m", str(model),
@@ -181,6 +289,8 @@ def run_whisper(
         "-l", lang,
         "-nt",           # no timestamps in output
         "-np",           # no progress prints
+        "-oj",           # write JSON (carries the detected language)
+        "-of", str(out_prefix),
     ]
     logging.info("running whisper-cli: %s", " ".join(cmd))
     result = subprocess.run(
@@ -192,8 +302,22 @@ def run_whisper(
     )
     if result.returncode != 0:
         logging.error("whisper-cli failed (rc=%d):\n%s", result.returncode, result.stderr)
-        return ""
-    return result.stdout.strip()
+        return "", ""
+
+    text, detected = "", ""
+    try:
+        text, detected = parse_whisper_json(json_path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        logging.warning("could not read whisper JSON %s: %s", json_path, exc)
+    finally:
+        try:
+            json_path.unlink()
+        except OSError:
+            pass
+
+    if not text:
+        text = result.stdout.strip()
+    return text, detected
 
 
 def to_ipa(
@@ -240,8 +364,112 @@ def write_latest_transcript(text: str, wav_path: Path, lang: str) -> None:
     LATEST_TRANSCRIPT.write_text(text + "\n", encoding="utf-8")
 
 
-def submit_to_claude_code(text: str, window_title_re: str) -> bool:
-    """Find the Claude Code window, paste the text into it, press Enter.
+def find_chat_input(win) -> object | None:
+    """Locate the chat input control inside the Claude app window via UIA.
+
+    The Claude desktop app is Electron and exposes its whole web view as a
+    single UIA ``Document`` node, so the ``<textarea>`` is NOT a distinct
+    ``Edit`` control we can match by type. The input is, however, reachable
+    as a focusable ``Group`` in the bottom strip of the window spanning most
+    of its width — the other focusable Groups down there are narrow toolbar
+    buttons. We pick the single Group matching that geometric signature; if
+    zero or more than one match we return None and let the caller fall back
+    to plain window-level focus.
+
+    Returns the matched pywinauto element, or ``None`` when no unambiguous
+    candidate was found.
+    """
+    try:
+        wr = win.rectangle()
+    except Exception as exc:
+        logging.warning("could not get window rect for input search: %s", exc)
+        return None
+
+    # Lower ~28% of the window height is where the input row lives; the input
+    # spans most of the column width while toolbar buttons are narrow, so a
+    # >=40%-of-window-width filter isolates the input.
+    bottom_threshold = wr.top + int((wr.bottom - wr.top) * 0.72)
+    min_width = int((wr.right - wr.left) * 0.40)
+
+    try:
+        groups = win.descendants(control_type="Group")
+    except Exception as exc:
+        logging.warning("UIA descendants(Group) failed: %s", exc)
+        return None
+
+    candidates = []
+    for g in groups:
+        try:
+            r = g.rectangle()
+            focusable = bool(g.element_info.element.CurrentIsKeyboardFocusable)
+        except Exception:
+            continue
+        if focusable and r.top >= bottom_threshold and (r.right - r.left) >= min_width:
+            candidates.append(g)
+
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        logging.info(
+            "UIA chat-input search found %d focusable wide Groups; ambiguous, skipping",
+            len(candidates),
+        )
+    return None
+
+
+def focus_chat_input(win) -> bool:
+    """Drop keyboard focus straight into the chat input box via UIA.
+
+    Calls ``set_focus`` on the located input Group — no mouse click, so the
+    user's cursor is left undisturbed. In the Claude desktop app this does
+    land the caret inside the inner textarea (verified empirically), so a
+    subsequent paste goes to the right place even if the caret had been
+    elsewhere (a button, the sidebar) beforehand.
+
+    Best-effort. Returns True on success, False if the input couldn't be
+    identified unambiguously or ``set_focus`` raised; the caller then falls
+    back to whatever control the window already has focused.
+    """
+    element = find_chat_input(win)
+    if element is None:
+        return False
+    try:
+        element.set_focus()
+    except Exception as exc:
+        logging.warning("set_focus on chat input Group failed: %s", exc)
+        return False
+    return True
+
+
+def paste_from_clipboard() -> None:
+    """Trigger a clipboard paste via a low-level Win32 Ctrl+V (keybd_event).
+
+    pywinauto's ``send_keys("^v")`` sends the Ctrl modifier in a way the
+    Claude desktop app (Electron/Chromium) silently ignores — plain-text
+    keystroke routing works, but the synthetic Ctrl+V never registers as a
+    paste, so nothing lands in the input. Driving the key transitions
+    through the Win32 ``keybd_event`` API directly DOES register as paste.
+    (Shift+Insert also works in this app and is an equally valid fallback.)
+    """
+    VK_CONTROL = 0x11
+    VK_V = 0x56
+    KEYEVENTF_KEYUP = 0x0002
+    user32 = ctypes.windll.user32
+    user32.keybd_event(VK_CONTROL, 0, 0, 0)
+    time.sleep(0.03)
+    user32.keybd_event(VK_V, 0, 0, 0)
+    time.sleep(0.03)
+    user32.keybd_event(VK_V, 0, KEYEVENTF_KEYUP, 0)
+    time.sleep(0.03)
+    user32.keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
+
+
+def submit_to_claude_code(text: str, window_title_re: str, press_enter: bool = True) -> bool:
+    """Find the Claude Code window, paste the text into it, and (optionally)
+    press Enter.
+
+    When `press_enter` is False the text is pasted into the chat input but NOT
+    submitted, so you can review/edit it and send manually.
 
     Windows 11's anti-focus-stealing protection routinely blocks
     pywinauto's set_focus() — silently! — when called from a process the
@@ -301,7 +529,6 @@ def submit_to_claude_code(text: str, window_title_re: str) -> bool:
 
     # Verify focus actually landed on the target window. If not, the
     # keystrokes would be sent to the wrong window — bail out.
-    import ctypes
     user32 = ctypes.windll.user32
     fg_handle = int(user32.GetForegroundWindow())
     if fg_handle != target_handle:
@@ -314,10 +541,20 @@ def submit_to_claude_code(text: str, window_title_re: str) -> bool:
             except Exception: pass
         return False
 
+    # Window is foreground — now drop the caret straight into the chat input
+    # box via UIA so the paste lands there even if the caret had been on a
+    # button or the sidebar. Best-effort: on failure we fall through to
+    # whatever control the window already has focused (then the caret must
+    # already be in the input — see the startup NOTE).
+    if focus_chat_input(win):
+        logging.info("focused chat input via UIA Group")
+        time.sleep(0.10)  # let focus settle before we paste
+
     try:
-        send_keys("^v")        # Ctrl+V: paste the transcript into chat input
-        time.sleep(0.10)
-        send_keys("{ENTER}")   # submit
+        paste_from_clipboard()  # Ctrl+V (low-level) → paste transcript into chat input
+        if press_enter:
+            time.sleep(0.10)
+            send_keys("{ENTER}")   # submit
     except Exception as exc:
         logging.exception("keystroke send failed: %s", exc)
         return False
@@ -336,8 +573,12 @@ def submit_to_claude_code(text: str, window_title_re: str) -> bool:
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description="Push-to-talk voice input for Claude-Tutor")
-    parser.add_argument("--lang", default="en", help="ISO 639-1 code, e.g. en, nl, de")
-    parser.add_argument("--hotkey", default=DEFAULT_HOTKEY, help="hotkey to hold while speaking (default: f9)")
+    parser.add_argument("--target", help="ISO 639-1 code of the language being learned (spoken + IPA), e.g. nl, en, de")
+    parser.add_argument("--common", help="ISO 639-1 code of your communication language (notes, never spoken), e.g. ru")
+    parser.add_argument("--lang", help=argparse.SUPPRESS)  # back-compat alias for --target
+    parser.add_argument("--target-hotkey", default=DEFAULT_TARGET_HOTKEY, help="hold to speak the TARGET language, forced transcription + IPA (default: f9)")
+    parser.add_argument("--common-hotkey", default=DEFAULT_COMMON_HOTKEY, help="hold to speak the COMMON language, forced transcription, no IPA (default: f10)")
+    parser.add_argument("--hotkey", help=argparse.SUPPRESS)  # back-compat alias for --target-hotkey
     parser.add_argument("--model", type=Path, default=DEFAULT_MODEL, help="path to ggml whisper model")
     parser.add_argument("--whisper-cli", type=Path, default=DEFAULT_WHISPER_CLI, help="path to whisper-cli.exe")
     parser.add_argument("--espeak-ng", type=Path, default=DEFAULT_ESPEAK_NG, help="path to espeak-ng.exe (for IPA conversion)")
@@ -355,7 +596,22 @@ def main(argv: list[str]) -> int:
     parser.add_argument(
         "--no-auto-submit",
         action="store_true",
-        help="skip the auto-paste-and-Enter step; the UserPromptSubmit hook will inject the transcript when you press Enter manually",
+        help="skip the auto-paste step entirely; the UserPromptSubmit hook will inject the transcript when you press Enter manually",
+    )
+    parser.add_argument(
+        "--no-enter",
+        action="store_true",
+        help="paste the transcript into the chat window but do NOT press Enter, so you can review/edit and submit it yourself",
+    )
+    parser.add_argument(
+        "--input-device",
+        default=None,
+        help="microphone to record from: device index or a substring of its name (default: system default). Use --list-devices to see options.",
+    )
+    parser.add_argument(
+        "--list-devices",
+        action="store_true",
+        help="print available audio input/output devices and exit",
     )
     parser.add_argument(
         "--list-windows",
@@ -363,6 +619,10 @@ def main(argv: list[str]) -> int:
         help="print all visible top-level window titles and exit (use to discover the right --window-title-re)",
     )
     args = parser.parse_args(argv)
+
+    if args.list_devices:
+        print(format_device_list())
+        return 0
 
     if args.list_windows:
         print("All visible top-level windows:")
@@ -373,6 +633,18 @@ def main(argv: list[str]) -> int:
         return 0
 
     setup_logging()
+
+    target = (args.target or args.lang or "").strip().lower()
+    common = (args.common or "").strip().lower()
+    if not target:
+        logging.error("no target language given; pass --target <code> (e.g. nl)")
+        return 2
+    if not common:
+        logging.error("no common language given; pass --common <code> (e.g. ru)")
+        return 2
+    if target == common:
+        logging.error("--target and --common must differ (both were %r)", target)
+        return 2
 
     if not args.whisper_cli.is_file():
         logging.error("whisper-cli not found: %s", args.whisper_cli)
@@ -387,23 +659,46 @@ def main(argv: list[str]) -> int:
         logging.error("espeak-ng-data dir not found: %s", args.espeak_data)
         return 2
 
-    espeak_voice = args.espeak_voice or LANG_TO_ESPEAK_VOICE.get(args.lang, args.lang)
+    espeak_voice = args.espeak_voice or LANG_TO_ESPEAK_VOICE.get(target, target)
 
     try:
-        hotkey = resolve_hotkey(args.hotkey)
+        target_key = resolve_hotkey(args.hotkey or args.target_hotkey)
+        common_key = resolve_hotkey(args.common_hotkey)
     except ValueError as exc:
         logging.error(str(exc))
         return 2
+    if target_key == common_key:
+        logging.error("target and common hotkeys must differ (both resolve to %s)", format_hotkey_name(target_key))
+        return 2
+
+    try:
+        input_device = resolve_audio_device(args.input_device, want_input=True)
+    except ValueError as exc:
+        logging.error("input device: %s", exc)
+        return 2
+    if input_device is not None:
+        logging.info("recording from input device [%s] %s", input_device, sd.query_devices(input_device)["name"])
+
+    # Map each hotkey to the language it forces. The pressed key, not language
+    # detection, decides how the clip is transcribed — this avoids misreading
+    # mixed-language speech (e.g. Dutch words inside a Russian sentence).
+    hotkey_map = {target_key: target, common_key: common}
 
     RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
 
     logging.info(
-        "ready: lang=%s, espeak_voice=%s, hotkey=%s, model=%s, auto_submit=%s",
-        args.lang, espeak_voice, format_hotkey_name(hotkey), args.model.name, not args.no_auto_submit,
+        "ready: target=%s (%s), common=%s (%s), espeak_voice=%s, model=%s, auto_submit=%s",
+        target, format_hotkey_name(target_key), common, format_hotkey_name(common_key),
+        espeak_voice, args.model.name, not args.no_auto_submit,
     )
     print("=" * 60, flush=True)
-    print(f"Push-to-talk active for language '{args.lang}' (IPA via espeak-ng voice '{espeak_voice}').", flush=True)
-    print(f"Hold {format_hotkey_name(hotkey)} anywhere to record. Ctrl+C to quit.", flush=True)
+    print(f"Push-to-talk active.", flush=True)
+    print(f"  Hold {format_hotkey_name(target_key)} to speak TARGET '{target}' (transcribed as {target} + IPA via espeak-ng voice '{espeak_voice}').", flush=True)
+    print(f"  Hold {format_hotkey_name(common_key)} to speak COMMON '{common}' (transcribed as {common}, no IPA).", flush=True)
+    mic_label = (f"[{input_device}] {sd.query_devices(input_device)['name']}"
+                 if input_device is not None else "system default")
+    print(f"  Microphone: {mic_label}.", flush=True)
+    print("The key you hold forces the language — no auto-detection. Ctrl+C to quit.", flush=True)
 
     # Show which windows the auto-submit step will see, so a wrong match
     # is obvious upfront instead of surfacing as "Enter got sent somewhere else".
@@ -434,54 +729,83 @@ def main(argv: list[str]) -> int:
                     f"  (multiple matches — pass --window-title-re '<more-specific-regex>' to disambiguate)",
                     flush=True,
                 )
+        print(
+            "NOTE: the daemon focuses the chat input automatically (UIA).\n"
+            "      If a transcript ever fails to appear, click the input box\n"
+            "      once and try again — the auto-focus couldn't locate it.",
+            flush=True,
+        )
     else:
         print("Auto-submit DISABLED (--no-auto-submit). UserPromptSubmit hook will inject on manual Enter.", flush=True)
     print("=" * 60, flush=True)
 
+    capture_path = RECORDINGS_DIR / "rec_capture.wav"
     try:
         while True:
-            audio = record_until_release(hotkey)
+            audio, lang = record_until_release(hotkey_map, input_device=input_device)
+            if lang is None:
+                continue  # a non-hotkey release slipped through; ignore
             if audio is None or len(audio) < SAMPLE_RATE // 4:  # <0.25s = ignore
                 print("  [too short, ignored]\n", flush=True)
                 continue
 
-            seq = next_sequence_number(args.lang)
-            wav_path = RECORDINGS_DIR / f"rec_{args.lang}_{seq:04d}.wav"
-            wav_write(wav_path, SAMPLE_RATE, audio)
+            wav_write(capture_path, SAMPLE_RATE, audio)
             duration = len(audio) / SAMPLE_RATE
-            print(f"  saved: {wav_path.name} ({duration:.1f}s)", flush=True)
+            is_target = (lang == target)
+            print(f"  captured {duration:.1f}s, transcribing forced '{lang}'...", flush=True)
 
-            print("  transcribing...", flush=True)
-            text = run_whisper(wav_path, args.lang, args.model, args.whisper_cli)
+            text, _ = run_whisper(capture_path, lang, args.model, args.whisper_cli)
             if not text:
                 print("  [empty transcript — whisper-cli error, see log]\n", flush=True)
                 continue
 
-            ipa = to_ipa(text, espeak_voice, args.espeak_ng, args.espeak_data)
-            if ipa:
-                payload = f"{text}\n[{ipa}]"
+            # Persist the recording under the forced language code.
+            seq = next_sequence_number(lang)
+            wav_path = RECORDINGS_DIR / f"rec_{lang}_{seq:04d}.wav"
+            try:
+                if wav_path.exists():
+                    wav_path.unlink()
+                capture_path.replace(wav_path)
+            except OSError as exc:
+                logging.warning("could not rename capture to %s: %s", wav_path, exc)
+                wav_path = capture_path
+            print(f"  saved: {wav_path.name}", flush=True)
+
+            # IPA is a pronunciation aid for the target language only.
+            ipa = ""
+            if is_target:
+                ipa = to_ipa(text, espeak_voice, args.espeak_ng, args.espeak_data)
+                if ipa:
+                    payload = f"{text}\n[{ipa}]"
+                else:
+                    payload = text
+                    logging.warning("empty IPA from espeak-ng for %r; falling back to text only", text)
             else:
                 payload = text
-                logging.warning("empty IPA from espeak-ng for %r; falling back to text only", text)
 
-            write_latest_transcript(payload, wav_path, args.lang)
+            write_latest_transcript(payload, wav_path, lang)
             print(f"  text: {text}", flush=True)
-            if ipa:
-                print(f"  IPA : [{ipa}]", flush=True)
+            if is_target:
+                print(f"  IPA : [{ipa}]" if ipa else "  IPA : (espeak-ng error — see log)", flush=True)
             else:
-                print("  IPA : (espeak-ng error — see log)", flush=True)
-            logging.info("transcribed %s: text=%r ipa=%r", wav_path.name, text, ipa)
+                print("  IPA : (skipped — common language)", flush=True)
+            logging.info("transcribed %s: lang=%s text=%r ipa=%r", wav_path.name, lang, text, ipa)
 
             if args.no_auto_submit:
                 print("  [auto-submit disabled; press Enter in Claude Code to inject]\n", flush=True)
-            elif submit_to_claude_code(payload, args.window_title_re):
-                # Auto-submit won — remove the file so the fallback hook
-                # doesn't re-inject the same content on the user's next Enter.
-                try:
-                    LATEST_TRANSCRIPT.unlink()
-                except OSError:
-                    pass
-                print("  [submitted to Claude Code]\n", flush=True)
+            elif submit_to_claude_code(payload, args.window_title_re, press_enter=not args.no_enter):
+                if args.no_enter:
+                    # Pasted but not submitted — keep latest_transcript.txt as a
+                    # fallback in case the paste landed in the wrong place.
+                    print("  [pasted into Claude Code — review and press Enter to send]\n", flush=True)
+                else:
+                    # Auto-submit won — remove the file so the fallback hook
+                    # doesn't re-inject the same content on the user's next Enter.
+                    try:
+                        LATEST_TRANSCRIPT.unlink()
+                    except OSError:
+                        pass
+                    print("  [submitted to Claude Code]\n", flush=True)
             else:
                 print(
                     "  [auto-submit failed; transcript kept for hook fallback — press Enter in Claude Code]\n",

@@ -24,8 +24,8 @@ This change introduces a **two-language model**:
 ## Goals
 
 1. Skill invocation takes two languages: `/claude-speech <target> <common>`.
-2. Voice input (F9) auto-detects which of the two languages the learner spoke
-   and handles each appropriately.
+2. Voice input uses two keys — F9 (target) and F10 (common) — and the held key
+   forces the transcription language; no auto-detection.
 3. The teacher persona writes all meta-text in the common language.
 
 ## Non-goals
@@ -39,12 +39,18 @@ This change introduces a **two-language model**:
 
 | Decision | Choice |
 |----------|--------|
-| Recognition strategy | Whisper `-l auto` per utterance (single pass on the happy path) |
+| Recognition strategy | **Two push-to-talk keys** decide the language — no auto-detection. The held key forces whisper's `-l <code>`. |
+| Target key | F9 (configurable via `--target-hotkey`) → forces target, adds IPA |
+| Common key | F10 (configurable via `--common-hotkey`) → forces common, no IPA |
 | IPA scope | Target language only |
 | Notes language | Common language (Russian, etc.) |
 | Common language source | 2nd positional arg to the skill; ask if missing |
-| Misdetection (detected ∉ {target, common}) | Re-run forcing the **common** language; treat as common (no IPA) |
 | Flag name | `--common` (and `--target`, with `--lang` kept as an alias) |
+
+**Why two keys instead of auto-detect:** whisper auto-detection runs per clip
+and fails on mixed-language utterances — e.g. the Dutch words "zijn en hebben"
+spoken inside a mostly-Russian sentence were transcribed as the English
+"sign and habit". Letting the key choose the language removes the guess.
 
 ## Components and changes
 
@@ -60,23 +66,18 @@ This change introduces a **two-language model**:
 
 ### 2. push_to_talk.py
 
-- Whisper invoked with `-l auto` instead of a forced language.
-- Parse the detected-language code from whisper's stderr
-  (`auto-detected language: XX (p = ...)`).
-- Resolution rule:
-
-  | Detected | Resolved as | Payload |
-  |----------|-------------|---------|
-  | target   | target      | `text` + `\n[IPA]` (target espeak voice) |
-  | common   | common      | `text` |
-  | neither  | common (re-run forcing `-l <common>`) | `text` |
-
-- IPA is generated **only** when the resolved language is the target.
-- Recording filename uses the resolved code: `rec_<code>_NNNN.wav`.
+- Two hotkeys are registered. `record_until_release(hotkey_map)` listens for
+  either and returns `(audio, lang)` where `lang` is the code bound to the key
+  that was held.
+- Whisper is invoked forcing that language (`-l <lang>`); no detection step.
+- IPA is generated **only** when the held key is the target key.
+- Recording filename uses the forced code: `rec_<code>_NNNN.wav`.
 - CLI flags:
-  - `--target <code>` (new canonical name; `--lang` kept as a hidden/back-compat alias mapping to target).
-  - `--common <code>` (new, required for two-language behavior).
-  - Existing `--espeak-*`, `--hotkey`, `--window-title-re`, `--no-auto-submit`,
+  - `--target <code>` (canonical; `--lang` kept as a hidden/back-compat alias).
+  - `--common <code>` (required for two-language behavior).
+  - `--target-hotkey <key>` (default `f9`), `--common-hotkey <key>`
+    (default `f10`). `--hotkey` kept as a hidden alias for `--target-hotkey`.
+  - Existing `--espeak-*`, `--window-title-re`, `--no-auto-submit`,
     `--list-windows` unchanged.
 - The espeak voice used for IPA continues to derive from the target code
   (`LANG_TO_ESPEAK_VOICE`).
@@ -111,31 +112,28 @@ This change introduces a **two-language model**:
 ## Data flow (voice input)
 
 ```
-F9 held → record 16kHz mono WAV
-       → whisper-cli -l auto  → (text, detected_code)
-       → resolve(detected_code, target, common):
-            target → IPA via espeak(target voice); payload = text + "\n[" + ipa + "]"
-            common → payload = text
-            neither → re-run whisper -l <common>; payload = text
+F9 or F10 held → record 16kHz mono WAV  (lang = code bound to the held key)
+       → whisper-cli -l <lang>  → text
+       → if lang == target: payload = text + "\n[" + IPA(target voice) + "]"
+         else:               payload = text
        → write latest_transcript.txt
        → auto-submit to Claude Code window (fallback: UserPromptSubmit hook)
 ```
 
 ## Error handling
 
-- Whisper stderr lacks a detectable language line → treat as common (safe
-  default: no IPA, plain text).
-- Forced-common re-run fails → fall back to the original auto-pass text.
-- espeak-ng failure on a target utterance → payload falls back to text only
-  (existing behavior).
+- whisper-cli returns empty text → skip submit, log and continue.
+- espeak-ng failure on a target utterance → payload falls back to text only.
+- Target and common hotkeys resolve to the same key → startup error.
 
 ## Testing
 
-- Unit: detected-language parser against sample whisper stderr (target, common,
-  third-language, and missing-line cases).
-- Unit: resolution rule table (4 rows) → correct payload shape and IPA gating.
-- Manual: speak target → text + IPA; speak common → text only; speak a third
-  language → snaps to common, plain text.
+- Unit: `parse_whisper_json` against sample whisper JSON (text + missing-field
+  and garbage cases). Language selection is by keypress, so there is no
+  detection rule to unit-test.
+- Manual: hold F9 + speak target → text + IPA; hold F10 + speak common →
+  text only; mixed-language sentence under the correct key → transcribed in the
+  intended language (no English mis-mapping).
 - Installer: `--target nl --common ru` renders CLAUDE.md with Russian notes and
   a Dutch tag convention; unknown common errors out.
 
