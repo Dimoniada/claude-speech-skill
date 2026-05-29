@@ -49,7 +49,7 @@ Trigger when the user says any of:
    - Carry the input choice into the daemon spawn (`--input-device`) in step 7 and the output choice into the installer (`--output-device`) in step 5.
    - To turn everything off later, the user runs `/claude-speech off` (or `stop` / `kill`) — see step 0.
 
-4. **Resolve the target directory.** Use `$CLAUDE_PROJECT_DIR` (the current Claude Code project root). If that env var is missing, fall back to the current working directory. Confirm the target with the user before writing files.
+4. **Resolve the project directory.** Use `$CLAUDE_PROJECT_DIR` (the current Claude Code project root). If that env var is missing, fall back to the current working directory. Confirm the directory with the user before writing files.
 
 5. **Run the installer** (from this skill's directory), passing the output device chosen in step 3:
    ```
@@ -57,11 +57,11 @@ Trigger when the user says any of:
    ```
    Note: `--target` is the target **language** (same name the daemon uses) and `--common` is the communication language; the scaffold **destination** is `--project-dir`, not `--target`. (`--lang` is still accepted as a hidden alias for `--target`.) `--output-device` is the speaker chosen in step 3 (required by this skill's flow) and is baked into the Stop hook in `.claude/settings.json`. This writes `CLAUDE.md`, `.claude/settings.json`, `scripts/speak_lang.py`, `scripts/push_to_talk.py`, and `scripts/inject_transcript.py` into the project dir. It also pip-installs `edge-tts`, the voice-in deps (`numpy sounddevice scipy pynput pywinauto pyperclip`), and `miniaudio` (for output-device playback) if missing. Pass `--no-voice-in` to skip the push-to-talk pieces (TTS-only setup — then only the output device is needed).
 
-6. **Confirm next steps** with the user: open the target dir in a fresh Claude Code session (or reload `/config` if already inside), then say hi — the assistant will greet them in the target language (with notes in the common language) using the agreed tag convention.
+6. **Confirm next steps** with the user: open the project dir in a fresh Claude Code session (or reload `/config` if already inside), then say hi — the assistant will greet them in the target language (with notes in the common language) using the agreed tag convention.
 
-7. **Auto-start the push-to-talk daemon (if it exists in the target).** If `<target>/scripts/push_to_talk.py` is present (i.e. the user didn't pass `--no-voice-in`), spawn it in the background with the chosen language code:
+7. **Auto-start the push-to-talk daemon (if it exists in the project dir).** If `<project-dir>/scripts/push_to_talk.py` is present (i.e. the user didn't pass `--no-voice-in`), spawn it in the background with the chosen language code:
    - Before spawning, kill any prior instance to avoid duplicate keyboard listeners (use the same PowerShell command from step 0).
-   - Spawn detached so it survives this turn. From Claude Code's Bash tool, use `run_in_background=true` with the microphone chosen in step 3: `py "<target>\\scripts\\push_to_talk.py" --target <target_code> --common <common_code> --input-device "<name|index>"`.
+   - Spawn detached so it survives this turn. From Claude Code's Bash tool, use `run_in_background=true` with the microphone chosen in step 3: `py "<project-dir>\\scripts\\push_to_talk.py" --target <target_code> --common <common_code> --input-device "<name|index>"`.
    - Confirm to the user that the daemon is running and which keys to hold: **F9** for the target language (with IPA), **F10** for the common language (text only). Remind them they may need to set `--window-title-re` if the auto-submit picks the wrong window; tell them to run with `--list-windows` once to see candidates. The keys are configurable via `--target-hotkey` / `--common-hotkey`, and the microphone via `--input-device` (list options with `--list-devices`).
    - **Important:** the daemon will not be functional until the user has manually installed the binary dependencies (`whisper-cli.exe`, the ggml model, and `espeak-ng.exe`) — see README's "Voice input — binary dependencies" section. The Python scaffold is ready; the binaries are BYO.
 
