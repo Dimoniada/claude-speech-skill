@@ -5,10 +5,10 @@ description: Scaffold a language tutor in any project — Claude speaks target-l
 
 # claude-speech
 
-This skill bootstraps a self-contained language-learning project inside the user's current Claude Code workspace:
-- a teacher persona (`CLAUDE.md`) for the chosen language,
+This skill bootstraps a self-contained language-learning project inside the user's current Claude Code workspace. It works with **two languages**: a **target language** (the one being learned — spoken aloud, with IPA pronunciation help) and a **common language** (the learner's native tongue — used for notes, corrections, and free chat, never spoken). It installs:
+- a teacher persona (`CLAUDE.md`) that speaks the target language and writes all notes in the common language,
 - a `Stop` hook + `scripts/speak_lang.py` that uses `edge-tts` to speak only the target-language portion of Claude's replies aloud,
-- a `UserPromptSubmit` hook + `scripts/push_to_talk.py` + `scripts/inject_transcript.py` for **F9 push-to-talk voice input** that transcribes via local Whisper, converts to IPA via espeak-ng, and pastes the transcription into the chat as your message.
+- a `UserPromptSubmit` hook + `scripts/push_to_talk.py` + `scripts/inject_transcript.py` for **two-key push-to-talk voice input** — hold **F9** to speak the target language or **F10** to speak the common language. The held key forces the transcription language (no auto-detection, so mixed-language speech isn't misread), transcribes via local Whisper, adds an IPA line (espeak-ng) only for target-language speech, and pastes the result into the chat as your message.
 
 ## When to use
 
@@ -32,24 +32,37 @@ Trigger when the user says any of:
      3. Report the PIDs killed (or "no daemons were running") and confirm the stale transcript was cleared.
    - Any other argument is treated as a language name or ISO code — proceed with steps 1+ below.
 
-1. **Ask the user which language** to teach. Accept names ("Dutch", "German", "Polish") or ISO 639-1 codes ("nl", "de", "pl"). Default list of supported languages lives in `voices.json` next to this skill — open it if the user asks what's available.
+1. **Resolve the two languages.** The skill takes two positional arguments: `/claude-speech <target> <common>`.
+   - **Arg 1 = target language** (the one being learned, spoken aloud + IPA).
+   - **Arg 2 = common language** (the learner's native language, used for notes/corrections, never spoken).
+   - Accept names ("Dutch", "Russian") or ISO 639-1 codes ("nl", "ru"). Both must exist in `voices.json` next to this skill — open it if the user asks what's available.
+   - If the target (arg 1) is missing, ask which language to teach.
+   - **If the common language (arg 2) is missing, ask for it before proceeding** — do not assume English.
 
 2. **Ask if they want a non-default voice.** Each language has a recommended `edge-tts` voice; if the user wants something different (different gender, accent, or specific neural voice), they can pass it as `--voice <voice-id>`.
 
-3. **Resolve the target directory.** Use `$CLAUDE_PROJECT_DIR` (the current Claude Code project root). If that env var is missing, fall back to the current working directory. Confirm the target with the user before writing files.
+3. **Select audio devices — REQUIRED, before anything is installed or launched.** Device selection is mandatory: do not run the installer, do not write files, and do not spawn any background process until the user has explicitly chosen both an input and an output device. Do this as two separate, ordered choices:
+   1. **List the devices.** Run `py templates/scripts/push_to_talk.py --list-devices` (works from the skill directory; it needs only the voice-in Python deps). It prints input devices first, then output devices, each with an index, name, and host API.
+   2. **Microphone (input) — required.** Show the user the input-device list and ask which microphone to use. Wait for an explicit answer. If the user declines or gives no usable choice, **stop here** — report that a microphone is required and that nothing was installed or started. (Exception: if the user explicitly asked for a TTS-only setup with `--no-voice-in`, there is no push-to-talk, so skip the microphone step.)
+   3. **Speaker (output) — required.** Then show the output-device list and ask which speaker/headphone to use for spoken replies. Wait for an explicit answer. If the user declines or gives no usable choice, **stop here** — report that an output device is required and that nothing was installed or started.
+   - **Prefer a name substring** (e.g. `"USB PnP"`, `"OnePlus"`) over a raw index when recording the choice — indices are reassigned across reboots/replugs, names are stable. Pick a substring that is specific enough to identify the device the user named.
+   - Carry the input choice into the daemon spawn (`--input-device`) in step 7 and the output choice into the installer (`--output-device`) in step 5.
+   - To turn everything off later, the user runs `/claude-speech off` (or `stop` / `kill`) — see step 0.
 
-4. **Run the installer** (from this skill's directory):
+4. **Resolve the target directory.** Use `$CLAUDE_PROJECT_DIR` (the current Claude Code project root). If that env var is missing, fall back to the current working directory. Confirm the target with the user before writing files.
+
+5. **Run the installer** (from this skill's directory), passing the output device chosen in step 3:
    ```
-   py install.py --lang <name> [--voice <voice-id>] [--target <dir>] [--force] [--no-voice-in]
+   py install.py --lang <target> --common <common> --output-device "<name|index>" [--voice <voice-id>] [--target <dir>] [--force] [--no-voice-in]
    ```
-   This writes `CLAUDE.md`, `.claude/settings.json`, `scripts/speak_lang.py`, `scripts/push_to_talk.py`, and `scripts/inject_transcript.py` into the target. It also pip-installs `edge-tts` and the voice-in deps (`numpy sounddevice scipy pynput pywinauto pyperclip`) if missing. Pass `--no-voice-in` to skip the push-to-talk pieces (TTS-only setup).
+   Note: `--lang` is the target language and `--common` is the communication language; `--target` (if used) is the output *directory*, not a language. `--output-device` is the speaker chosen in step 3 (required by this skill's flow) and is baked into the Stop hook in `.claude/settings.json`. This writes `CLAUDE.md`, `.claude/settings.json`, `scripts/speak_lang.py`, `scripts/push_to_talk.py`, and `scripts/inject_transcript.py` into the target. It also pip-installs `edge-tts`, the voice-in deps (`numpy sounddevice scipy pynput pywinauto pyperclip`), and `miniaudio` (for output-device playback) if missing. Pass `--no-voice-in` to skip the push-to-talk pieces (TTS-only setup — then only the output device is needed).
 
-5. **Confirm next steps** with the user: open the target dir in a fresh Claude Code session (or reload `/config` if already inside), then say hi — the assistant will greet them in the chosen language with the agreed tag convention.
+6. **Confirm next steps** with the user: open the target dir in a fresh Claude Code session (or reload `/config` if already inside), then say hi — the assistant will greet them in the target language (with notes in the common language) using the agreed tag convention.
 
-6. **Auto-start the push-to-talk daemon (if it exists in the target).** If `<target>/scripts/push_to_talk.py` is present (i.e. the user didn't pass `--no-voice-in`), spawn it in the background with the chosen language code:
+7. **Auto-start the push-to-talk daemon (if it exists in the target).** If `<target>/scripts/push_to_talk.py` is present (i.e. the user didn't pass `--no-voice-in`), spawn it in the background with the chosen language code:
    - Before spawning, kill any prior instance to avoid duplicate keyboard listeners (use the same PowerShell command from step 0).
-   - Spawn detached so it survives this turn. From Claude Code's Bash tool, use `run_in_background=true` with: `py "<target>\\scripts\\push_to_talk.py" --lang <code>`
-   - Confirm to the user that the daemon is running, which hotkey to hold (default F9), and remind them they may need to set `--window-title-re` if the auto-submit picks the wrong window. Tell them to run with `--list-windows` once to see candidates.
+   - Spawn detached so it survives this turn. From Claude Code's Bash tool, use `run_in_background=true` with the microphone chosen in step 3: `py "<target>\\scripts\\push_to_talk.py" --target <target_code> --common <common_code> --input-device "<name|index>"`.
+   - Confirm to the user that the daemon is running and which keys to hold: **F9** for the target language (with IPA), **F10** for the common language (text only). Remind them they may need to set `--window-title-re` if the auto-submit picks the wrong window; tell them to run with `--list-windows` once to see candidates. The keys are configurable via `--target-hotkey` / `--common-hotkey`, and the microphone via `--input-device` (list options with `--list-devices`).
    - **Important:** the daemon will not be functional until the user has manually installed the binary dependencies (`whisper-cli.exe`, the ggml model, and `espeak-ng.exe`) — see README's "Voice input — binary dependencies" section. The Python scaffold is ready; the binaries are BYO.
 
 ## Tag convention

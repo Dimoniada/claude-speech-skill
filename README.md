@@ -2,10 +2,10 @@
 
 A Claude Code skill that turns any project into a **language-learning workspace** with two-way voice:
 
-- **Output (TTS)** — Claude speaks target-language phrases aloud, English pedagogical notes stay silent.
-- **Input (F9 push-to-talk)** — hold F9, speak in your target language, release. Local Whisper transcribes, espeak-ng converts to IPA, and your spoken sentence (with phonetic transcription) appears in the chat as your message automatically.
+- **Output (TTS)** — Claude speaks target-language phrases aloud, native-language notes stay silent.
+- **Input (push-to-talk, two keys)** — hold **F9** to speak the language you're learning, or **F10** to speak your native language. Release, and local Whisper transcribes in the language the held key forces (no auto-detection, so mixed-language speech isn't misread). For the learned language espeak-ng adds an IPA line; your message then appears in the chat as your message automatically.
 
-Unlike whole-response TTS plugins, `claude-speech` reads **only** the text inside language tags, so mixed-language replies (Dutch sentence + English correction) sound natural — you hear the part you're practicing, you read the part that explains it. The voice-input side keeps everything local: no audio leaves your machine.
+Unlike whole-response TTS plugins, `claude-speech` reads **only** the text inside language tags, so mixed-language replies (a learned-language sentence + a native-language correction) sound natural — you hear the part you're practicing, you read the part that explains it. The voice-input side keeps everything local: no audio leaves your machine.
 
 ## How it works
 
@@ -16,12 +16,14 @@ The skill scaffolds these files into your project:
 | `CLAUDE.md` | Teacher persona for the chosen language, with tag rules |
 | `.claude/settings.json` | `Stop` hook (TTS) + `UserPromptSubmit` hook (voice-in fallback) |
 | `scripts/speak_lang.py` | Extracts tagged text from Claude's reply, synthesizes via `edge-tts`, plays via Windows MCI |
-| `scripts/push_to_talk.py` | F9-driven daemon: records mic → Whisper → IPA → pastes into chat |
+| `scripts/push_to_talk.py` | Two-key daemon (F9 = learned language + IPA, F10 = native language): records mic → Whisper → IPA → pastes into chat |
 | `scripts/inject_transcript.py` | UserPromptSubmit hook that injects the last transcript if auto-paste couldn't focus the chat window |
 
 **Output flow.** When Claude finishes a reply, the Stop hook reads the transcript, pulls every `<{code}>...</{code}>` block (where `{code}` is the ISO 639-1 code of the language you're learning), and pipes them to `edge-tts` for playback.
 
-**Input flow.** The push-to-talk daemon runs in a separate terminal. Hold F9 anywhere (global hotkey, focus-agnostic) → it records 16 kHz mono PCM → release F9 → it calls a local `whisper-cli.exe` to transcribe → then `espeak-ng --ipa` to render IPA → finally focuses your Claude Code window and pastes the two-line `text\n[IPA]` payload + Enter. If window-focus is blocked by Windows 11 anti-focus-stealing, it falls back to writing `recordings/latest_transcript.txt`, and the `UserPromptSubmit` hook injects it on your next manual Enter.
+**Input flow.** The push-to-talk daemon runs in a separate terminal. Hold **F9** (learned language) or **F10** (native language) anywhere — both are global hotkeys → it records 16 kHz mono PCM → release the key → it calls a local `whisper-cli.exe`, forcing the language bound to the key you held (no auto-detection) → for the learned language it then runs `espeak-ng --ipa` to render IPA → finally it focuses your Claude Code window and pastes the payload (`text` alone for the native language, `text\n[IPA]` for the learned one) + Enter. If window-focus is blocked by Windows 11 anti-focus-stealing, it falls back to writing `recordings/latest_transcript.txt`, and the `UserPromptSubmit` hook injects it on your next manual Enter.
+
+> **Focusing the input.** The daemon focuses the chat input box for you. The Claude app is Electron and exposes its whole web view as a single accessibility node, so there's no distinct text control to target by type — instead the daemon locates the input as the focusable container in the bottom strip of the window (a UIA `Group` spanning most of the width) and calls `set_focus` on it, which lands the caret in the message box without touching your mouse. This works even if the caret was on a button or the sidebar beforehand. **If a transcript ever fails to appear in the input, the auto-focus couldn't find the box** (unusual window layout, a Claude UI change, or more than one matching container) — click the input box once yourself and try again; with the caret already there the paste lands regardless.
 
 ## The language tag convention
 
@@ -44,7 +46,7 @@ Each language has a **2-letter tag** matching ISO 639-1:
 The generated `CLAUDE.md` tells the assistant:
 
 > Wrap every utterance in {language} inside `<{code}>...</{code}>` tags.
-> English pedagogical notes go outside the tags and stay silent.
+> Notes and corrections (written in your native language) go outside the tags and stay silent.
 
 ### Worked example (learning Dutch)
 
@@ -56,7 +58,7 @@ A typical reply looks like:
 (Started with a basic greeting — try answering with "Het gaat goed".)
 ```
 
-The script extracts only the Dutch sentence and plays it. The English note appears on screen but is never spoken — so you can read it at your own pace while practicing the spoken part.
+The script extracts only the Dutch sentence and plays it. The note appears on screen but is never spoken — so you can read it at your own pace while practicing the spoken part. (The notes here are shown in English for the README; in a real session they're written in whichever native language you passed as `--common`.)
 
 You can also have multiple Dutch utterances in one reply:
 
@@ -68,27 +70,31 @@ You can also have multiple Dutch utterances in one reply:
 
 Both blocks are concatenated and played back-to-back.
 
-## Voice input (F9 push-to-talk)
+## Voice input (push-to-talk)
 
 After running `install.py` *and* installing the binary deps (see next section), open a separate terminal and start the daemon:
 
 ```powershell
-py D:\Data\my-dutch-project\scripts\push_to_talk.py --lang nl
+py D:\Data\my-dutch-project\scripts\push_to_talk.py --target nl --common ru
 ```
 
 The daemon prints a banner showing which window will receive the auto-paste:
 
 ```
 ============================================================
-Push-to-talk active for language 'nl' (IPA via espeak-ng voice 'nl').
-Hold F9 anywhere to record. Ctrl+C to quit.
+Push-to-talk active.
+  Hold F9 to speak TARGET 'nl' (transcribed as nl + IPA via espeak-ng voice 'nl').
+  Hold F10 to speak COMMON 'ru' (transcribed as ru, no IPA).
+The key you hold forces the language — no auto-detection. Ctrl+C to quit.
 Auto-submit target (matches for '.*Claude.*'):
   0. 'Claude'  <- will use
+NOTE: the daemon focuses the chat input automatically (UIA).
+      If a transcript ever fails to appear, click the input box
+      once and try again — the auto-focus couldn't locate it.
 ============================================================
-Hold F9 to record, release to transcribe.
 ```
 
-Hold **F9**, speak in your target language, release. After ~1 s on a modest CPU (faster with the optional Vulkan build — see below) your message appears in the chat as two lines: the orthographic text Whisper recognized, plus the IPA in brackets so you can audit your pronunciation. For example, after saying "Ik ga naar de winkel" you'll see:
+Hold **F9**, speak in the language you're learning, release. After ~1 s on a modest CPU (faster with the optional Vulkan build — see below) your message appears in the chat as two lines: the orthographic text Whisper recognized, plus the IPA in brackets so you can audit your pronunciation. (Hold **F10** instead to speak your native language — it arrives as plain text, no IPA.) For example, after saying "Ik ga naar de winkel" you'll see:
 
 ```
 Ik ga naar de winkel
@@ -99,13 +105,48 @@ Ik ga naar de winkel
 
 | Flag | Purpose |
 |---|---|
-| `--lang <code>` | Target language. Mirrors `voices.json` codes. Default `en`. |
-| `--hotkey <key>` | Override push-to-talk key. Default `f9`. Examples: `f10`, `f12`. |
+| `--target <code>` | The language you're learning — spoken aloud + IPA. Mirrors `voices.json` codes. Required. |
+| `--common <code>` | Your native/communication language — notes only, never spoken, no IPA. Required. |
+| `--target-hotkey <key>` | Override the key held to speak the target language. Default `f9`. |
+| `--common-hotkey <key>` | Override the key held to speak the common language. Default `f10`. |
+| `--input-device <name\|index>` | Microphone to record from — a device index or a substring of its name. Default: system default. Prefer a name (indices aren't stable across reboots). |
+| `--list-devices` | Print available audio input/output devices (index + name + host API) and exit. |
 | `--list-windows` | Print all visible top-level window titles and exit. Use to discover the right `--window-title-re`. |
 | `--window-title-re '<regex>'` | Regex matching the Claude Code window to paste into. Default `.*Claude.*`. If multiple windows match, the first is picked — disambiguate with a more specific regex like `^Claude$` or `^Claude-Tutor$`. |
 | `--no-auto-submit` | Skip the auto-paste + Enter. Daemon only writes `recordings/latest_transcript.txt`; the `UserPromptSubmit` hook injects on your manual Enter. Use this if auto-paste keeps targeting the wrong window. |
-| `--espeak-voice <voice>` | Override the espeak-ng voice for IPA. Default derived from `--lang` (e.g. `en` → `en-us`, `zh` → `cmn`). |
+| `--no-enter` | Paste the transcript into the chat input but don't press Enter, so you can review/edit it before sending. |
+| `--espeak-voice <voice>` | Override the espeak-ng voice for IPA. Default derived from `--target` (e.g. `en` → `en-us`, `zh` → `cmn`). |
 | `--model <path>` | Override the ggml whisper model path. |
+
+### Choosing audio devices
+
+By default the daemon records from the system default microphone and TTS plays on the system default output. You can pin both to specific devices — useful when, say, the default keeps flipping to a Bluetooth headset's low-quality hands-free mic.
+
+First, list what's available:
+
+```powershell
+py scripts\push_to_talk.py --list-devices
+```
+
+This prints every input and output device with its index, name, and host API (MME / DirectSound / WASAPI / …). The same hardware usually appears several times, once per host API — that's normal.
+
+**Always prefer a name substring over an index.** Device indices are reassigned across reboots and when you plug/unplug devices, so an index baked into a config can silently point at the wrong thing later. A name substring (`"USB PnP"`, `"OnePlus"`) is matched at runtime and survives reordering. When a name matches several host-API entries for the same hardware, the lowest index is used (and the alternatives are logged).
+
+- **Microphone (input):** pass `--input-device` to the daemon:
+  ```powershell
+  py scripts\push_to_talk.py --target nl --common ru --input-device "USB PnP"
+  ```
+- **Speaker/headphone (output):** pass `--output-device` to the **installer**, which bakes it into the Stop hook in `.claude/settings.json`:
+  ```powershell
+  py install.py --lang Dutch --common Russian --output-device "Headphones"
+  ```
+  When an output device is chosen, TTS no longer plays through the dependency-free Windows MCI path; instead the edge-tts MP3 is decoded with [`miniaudio`](https://pypi.org/project/miniaudio/) and played via `sounddevice` on that endpoint. The installer pip-installs `miniaudio` automatically in that case. With no `--output-device`, nothing changes — playback stays on MCI and the system default.
+
+You can also test output routing directly:
+
+```powershell
+py scripts\speak_lang.py --list-devices
+```
 
 ### Disabling / stopping the daemon
 
@@ -117,7 +158,7 @@ In a Claude Code session, the skill responds to a control argument:
 
 This finds every running `push_to_talk.py` daemon, terminates it, and clears any pending `latest_transcript.txt` so the fallback hook doesn't keep re-injecting stale content. Aliases: `stop`, `kill`.
 
-To re-enable, run `py …\scripts\push_to_talk.py --lang …` in a fresh terminal, or just invoke `/claude-speech <language>` again — the skill auto-spawns the daemon as step 6 of its setup.
+To re-enable, run `py …\scripts\push_to_talk.py --target … --common …` in a fresh terminal, or just invoke `/claude-speech <target> <common>` again — the skill auto-spawns the daemon as step 6 of its setup.
 
 ## Voice input — binary dependencies
 
@@ -323,7 +364,7 @@ You can also just clone the repo anywhere and run `install.py` directly:
 
 ```powershell
 git clone https://github.com/Dimoniada/claude-speech-skill D:\Tools\claude-speech
-py D:\Tools\claude-speech\install.py --lang Dutch --target D:\Data\my-dutch-project
+py D:\Tools\claude-speech\install.py --lang Dutch --common Russian --target D:\Data\my-dutch-project
 ```
 
 ## Usage
@@ -339,24 +380,24 @@ Claude will resolve the target directory from `$CLAUDE_PROJECT_DIR` (Claude Code
 
 ```powershell
 # Default voice
-py install.py --lang Dutch
+py install.py --lang Dutch --common Russian
 
 # Override voice
-py install.py --lang German --voice de-DE-ConradNeural
+py install.py --lang German --common Russian --voice de-DE-ConradNeural
 
 # Explicit target dir (otherwise $CLAUDE_PROJECT_DIR, otherwise CWD)
-py install.py --lang Spanish --target D:\Data\spanish-practice
+py install.py --lang Spanish --common Russian --target D:\Data\spanish-practice
 
 # Overwrite existing files
-py install.py --lang Dutch --force
+py install.py --lang Dutch --common Russian --force
 
 # TTS-only — skip the push-to-talk scripts and their Python deps
-py install.py --lang Dutch --no-voice-in
+py install.py --lang Dutch --common Russian --no-voice-in
 ```
 
 After install, open the target directory in Claude Code and start chatting. The first time you say "hi", the assistant greets you in the chosen language and your speakers play the audio.
 
-If you want F9 push-to-talk too, follow the "Voice input — binary dependencies" section above to provision the three binary deps, then run `py …\scripts\push_to_talk.py --lang <code>` in a separate terminal.
+If you want push-to-talk too, follow the "Voice input — binary dependencies" section above to provision the three binary deps, then run `py …\scripts\push_to_talk.py --target <code> --common <code>` in a separate terminal.
 
 ## Adding a new language
 
@@ -372,7 +413,7 @@ Add an entry:
 {"name": "Norwegian", "code": "no", "iso": "nb-NO", "voice": "nb-NO-PernilleNeural"}
 ```
 
-Re-run the installer with `--lang Norwegian`.
+Re-run the installer with `--lang Norwegian --common <your-language>`.
 
 ## Troubleshooting
 
@@ -396,11 +437,17 @@ The Stop hook is scoped to the *project* `.claude/settings.json` — it does not
 **F9 records but nothing appears in the chat (silent failure).**
 The daemon found the right window and called `set_focus()`, but Windows 11's anti-focus-stealing protection blocked it — so the paste went to whatever was focused. The daemon ships with an "Alt-tap" workaround that fixes this in most cases, plus a foreground-handle verification that aborts if focus didn't actually move. Check `logs/push_to_talk.log` for a line like `foreground window is not target (target=..., fg=...) — aborting`. If you see that, the auto-submit path can't help — use the fallback by manually pressing Enter in the Claude window (the `UserPromptSubmit` hook will inject the transcript), or run with `--no-auto-submit`.
 
+**Spoken words don't appear in the input box on their own.**
+Normally the daemon focuses the chat input for you (it finds the input container via UIA and calls `set_focus`, no mouse needed) — check `logs/push_to_talk.log` for `focused chat input via UIA Group`. If that line is missing, the auto-focus couldn't identify the input box unambiguously (an unusual window size, a Claude UI change, or more than one matching container). In that case **move the keyboard focus into the input yourself**: click the message box once so the caret blinks there, then hold the key and speak — the paste lands wherever the caret is.
+
+**Paste still doesn't work even with the caret in the box.**
+The daemon pastes with a low-level Win32 `Ctrl+V` (`keybd_event`) rather than pywinauto's `send_keys("^v")`, because the Electron-based Claude app silently ignores the synthetic Ctrl+V from `send_keys`. If you adapted the script and paste stopped working, make sure you kept the `keybd_event` paste path (or switch it to Shift+Insert, which the app also accepts).
+
 **Auto-submit pastes into the wrong window.**
 The daemon picks the first window matching `--window-title-re` (default `.*Claude.*`). If you have multiple Claude-titled windows (e.g. the Claude Desktop client plus your Claude Code terminal), the first match might not be your chat. Run once with `--list-windows` to see all candidates, then restart with a more specific regex:
 
 ```powershell
-py scripts\push_to_talk.py --lang en --window-title-re "^Claude-Tutor$"
+py scripts\push_to_talk.py --target nl --common ru --window-title-re "^Claude-Tutor$"
 ```
 
 **`ERROR: missing dependency '<name>' for this Python interpreter.`**
@@ -410,7 +457,7 @@ You ran the daemon with a different `py` interpreter than the one `install.py` i
 The Python scaffold is set up but the binary deps aren't. Follow the "Voice input — binary dependencies" section above.
 
 **Whisper transcribes the wrong language.**
-Pass `--lang <code>` matching what you're actually speaking. The default is `en`. The model is multilingual; the flag just tells Whisper which language to decode.
+The language is forced by which key you hold — **F9** decodes as your target language, **F10** as your common language. If a clip comes out in the wrong language, you almost certainly held the wrong key. Also confirm `--target` / `--common` were set to the codes you intended when you started the daemon.
 
 **Daemon's terminal shows IPA garbled as `???` or hex.**
 PowerShell defaults to cp1252 codepage. The daemon already forces UTF-8 on stdout via `sys.stdout.reconfigure(encoding='utf-8')`, but if you're piping the daemon's output through another tool that re-encodes, you may need `chcp 65001` in your terminal session.
@@ -424,7 +471,7 @@ PowerShell defaults to cp1252 codepage. The daemon already forces UTF-8 on stdou
 
 ## Why not just use an existing TTS plugin?
 
-[claude-speak](https://github.com/silverdolphin863/claude-speak) and [claude-voice-system](https://github.com/Secondvisitation783/claude-voice-system) are great if you want the whole reply spoken. For language learning that doesn't work — you want the foreign sentence read aloud, but the English explanation kept silent (otherwise you can't have mixed-language pedagogical replies). `claude-speech` solves exactly that gap by reading only what's tagged.
+[claude-speak](https://github.com/silverdolphin863/claude-speak) and [claude-voice-system](https://github.com/Secondvisitation783/claude-voice-system) are great if you want the whole reply spoken. For language learning that doesn't work — you want the foreign sentence read aloud, but the native-language explanation kept silent (otherwise you can't have mixed-language pedagogical replies). `claude-speech` solves exactly that gap by reading only what's tagged.
 
 ## License
 

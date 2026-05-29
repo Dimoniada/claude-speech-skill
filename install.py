@@ -13,10 +13,10 @@ Target dir resolution order:
   3. current working directory
 
 Usage:
-    py install.py --lang Dutch
-    py install.py --lang German --voice de-DE-ConradNeural
-    py install.py --lang Dutch --target D:\\Data\\Claude-TTS --force
-    py install.py --lang Dutch --no-voice-in            # TTS-only, skip voice-in scripts/deps
+    py install.py --lang Dutch --common Russian
+    py install.py --lang German --common Russian --voice de-DE-ConradNeural
+    py install.py --lang Dutch --common Russian --target D:\\Data\\Claude-TTS --force
+    py install.py --lang Dutch --common Russian --no-voice-in   # TTS-only, skip voice-in
 """
 from __future__ import annotations
 
@@ -131,6 +131,7 @@ def ensure_pip_packages(packages: list[str], group_label: str) -> None:
         "pynput": "pynput",
         "pywinauto": "pywinauto",
         "pyperclip": "pyperclip",
+        "miniaudio": "miniaudio",
     }
     missing = []
     for pkg in packages:
@@ -157,11 +158,26 @@ TTS_DEPS = ["edge-tts"]
 # is only the Python side.
 VOICE_IN_DEPS = ["numpy", "sounddevice", "scipy", "pynput", "pywinauto", "pyperclip"]
 
+# Required only when TTS plays to a chosen output device (speak_lang.py
+# --output-device): miniaudio decodes the edge-tts MP3 so sounddevice can play
+# it on a specific endpoint. numpy/sounddevice come from VOICE_IN_DEPS; with
+# --no-voice-in we still need them for the chosen-device playback path.
+OUTPUT_DEVICE_DEPS = ["miniaudio", "numpy", "sounddevice"]
+
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description="claude-speech installer")
-    parser.add_argument("--lang", required=True, help="language name (e.g. Dutch, German) or ISO 639-1 code (e.g. nl)")
+    parser.add_argument("--lang", required=True, help="target language being learned: name (e.g. Dutch) or ISO 639-1 code (e.g. nl)")
+    parser.add_argument("--common", required=True, help="communication language for notes/corrections: name (e.g. Russian) or ISO 639-1 code (e.g. ru)")
     parser.add_argument("--voice", help="override edge-tts voice id (otherwise uses the recommended one from voices.json)")
+    parser.add_argument(
+        "--input-device",
+        help="microphone for push-to-talk: device index or a name substring. Baked into the daemon launch hint; the daemon also accepts --input-device directly. List options with: py scripts/push_to_talk.py --list-devices",
+    )
+    parser.add_argument(
+        "--output-device",
+        help="speaker/headphone for TTS playback: device index or a name substring. Baked into the Stop hook in settings.json. List options with: py scripts/speak_lang.py --list-devices",
+    )
     parser.add_argument("--target", help="target project directory (default: $CLAUDE_PROJECT_DIR or CWD)")
     parser.add_argument("--force", action="store_true", help="overwrite existing files")
     parser.add_argument("--skip-pip", action="store_true", help="don't run any pip installs (TTS or voice-in)")
@@ -173,24 +189,53 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     voices = load_voices()
+    available = ", ".join(f"{v['name']} ({v['code']})" for v in voices)
+
     entry = find_language(voices, args.lang)
     if entry is None:
-        available = ", ".join(f"{v['name']} ({v['code']})" for v in voices)
-        print(f"ERROR: unknown language '{args.lang}'.\nAvailable: {available}", file=sys.stderr)
+        print(f"ERROR: unknown target language '{args.lang}'.\nAvailable: {available}", file=sys.stderr)
+        return 2
+
+    common_entry = find_language(voices, args.common)
+    if common_entry is None:
+        print(f"ERROR: unknown common language '{args.common}'.\nAvailable: {available}", file=sys.stderr)
+        return 2
+
+    if common_entry["code"] == entry["code"]:
+        print(
+            f"ERROR: target and common language must differ (both are {entry['name']}).",
+            file=sys.stderr,
+        )
         return 2
 
     target = resolve_target(args.target)
     voice = args.voice or entry["voice"]
+
+    # Bake the chosen output device into the Stop-hook command in settings.json.
+    # The value lands inside a JSON string, so the quotes around the (possibly
+    # space-containing) device name must be backslash-escaped to match the
+    # template's existing \"...\" escaping. Empty when no device was chosen.
+    if args.output_device:
+        output_device_arg = ' --output-device \\"' + args.output_device.replace('"', "") + '\\"'
+    else:
+        output_device_arg = ""
 
     mapping = {
         "LANG_NAME": entry["name"],
         "LANG_CODE": entry["code"],
         "ISO": entry["iso"],
         "VOICE": voice,
+        "COMMON_NAME": common_entry["name"],
+        "COMMON_CODE": common_entry["code"],
+        "COMMON_ISO": common_entry["iso"],
+        "OUTPUT_DEVICE_ARG": output_device_arg,
         "TARGET": str(target).replace("\\", "\\\\"),  # JSON-safe path
     }
 
-    print(f"Scaffolding {entry['name']} ({entry['code']}, voice {voice}) into:\n  {target}\n")
+    print(
+        f"Scaffolding target {entry['name']} ({entry['code']}, voice {voice}) "
+        f"+ common {common_entry['name']} ({common_entry['code']}) into:\n  {target}\n"
+    )
     target.mkdir(parents=True, exist_ok=True)
 
     # CLAUDE.md
@@ -229,8 +274,15 @@ def main(argv: list[str]) -> int:
         ensure_pip_packages(TTS_DEPS, "TTS deps")
         if not args.no_voice_in:
             ensure_pip_packages(VOICE_IN_DEPS, "Voice-in deps")
+        # Playing TTS on a chosen output device decodes MP3 via miniaudio +
+        # sounddevice; only needed when --output-device was requested.
+        if args.output_device:
+            ensure_pip_packages(OUTPUT_DEVICE_DEPS, "Output-device deps")
 
-    print(f"\nDone. Open '{target}' in Claude Code and say hi — the assistant will greet you in {entry['name']}.")
+    print(
+        f"\nDone. Open '{target}' in Claude Code and say hi — the assistant will greet you in "
+        f"{entry['name']} and write its notes in {common_entry['name']}."
+    )
     if not args.no_voice_in:
         print(
             "\nVoice-in scaffolded. Before you can use F9 push-to-talk you must also\n"
