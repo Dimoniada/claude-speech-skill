@@ -318,6 +318,17 @@ def fetch_whisper_prebuilt(project_dir, url: str, rb: Rollbacker) -> None:
     download_file(url, zip_path, rb, min_bytes=1_000_000)
     extract_zip(zip_path, bin_dir, rb)
     zip_path.unlink(missing_ok=True)
+    # The push-to-talk daemon needs whisper-server.exe; verify the bundle
+    # actually contained it (parity with the Vulkan source-build check), so a
+    # changed upstream release layout fails here + rolls back rather than at
+    # daemon startup.
+    server_exe = _release_dir(project_dir) / "whisper-server.exe"
+    if not server_exe.is_file():
+        raise RuntimeError(
+            f"Downloaded whisper bundle is missing {server_exe.name} "
+            f"(extracted to {server_exe.parent}); the upstream release layout "
+            "may have changed."
+        )
 
 
 def fetch_model(project_dir, model_name: str, rb: Rollbacker) -> None:
