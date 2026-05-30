@@ -49,13 +49,21 @@ Trigger when the user says any of:
    - Carry the input choice into the daemon spawn (`--input-device`) in step 7 and the output choice into the installer (`--output-device`) in step 5.
    - To turn everything off later, the user runs `/claude-speech off` (or `stop` / `kill`) — see step 0.
 
+3b. **Select CPU or GPU for voice-in — before install.** After devices and before running the installer, detect the GPU and let the user choose:
+   1. Run `py provision_whisper.py --project-dir <dir> --gpu auto --detect-only`. (`<dir>` is resolved the same way as the project-dir step: `$CLAUDE_PROJECT_DIR` env var if set, otherwise CWD — so it is available here before the formal project-dir step.) It prints the detected GPU, the recommended backend (NVIDIA→CUDA, AMD/Intel→Vulkan, none→CPU), and a plan with sizes, rough time, and what is already installed.
+   2. Show that plan and ask **CPU or GPU?**
+      - **CPU** → pass `--gpu cpu` to the installer in step 5.
+      - **GPU** → show the full plan, get **explicit consent**, then pass `--gpu auto` (or `cuda`/`vulkan`). Without consent, do not provision.
+   - The Vulkan path (AMD/Intel) installs VS Build Tools + Vulkan SDK via winget and compiles from source — that is why explicit consent is required. NVIDIA/CPU are plain downloads. Already-installed dependencies are skipped. Any failure stops and rolls back in-project artifacts (system SDKs are kept).
+   - Skip this step entirely with `--no-voice-in` (TTS-only).
+
 4. **Resolve the project directory.** Use `$CLAUDE_PROJECT_DIR` (the current Claude Code project root). If that env var is missing, fall back to the current working directory. Confirm the directory with the user before writing files.
 
 5. **Run the installer** (from this skill's directory), passing the output device chosen in step 3:
    ```
-   py install.py --target <target> --common <common> --output-device "<name|index>" [--voice <voice-id>] [--project-dir <dir>] [--force] [--no-voice-in]
+   py install.py --target <target> --common <common> --output-device "<name|index>" --gpu <auto|cpu|cuda|vulkan> [--voice <voice-id>] [--project-dir <dir>] [--force] [--no-voice-in]
    ```
-   Note: `--target` is the target **language** (same name the daemon uses) and `--common` is the communication language; the scaffold **destination** is `--project-dir`, not `--target`. (`--lang` is still accepted as a hidden alias for `--target`.) `--output-device` is the speaker chosen in step 3 (required by this skill's flow) and is baked into the Stop hook in `.claude/settings.json`. This writes `CLAUDE.md`, `.claude/settings.json`, `scripts/speak_lang.py`, `scripts/push_to_talk.py`, and `scripts/inject_transcript.py` into the project dir. It also pip-installs `edge-tts`, the voice-in deps (`numpy sounddevice scipy pynput pywinauto pyperclip`), and `miniaudio` (for output-device playback) if missing. Pass `--no-voice-in` to skip the push-to-talk pieces (TTS-only setup — then only the output device is needed).
+   Note: `--target` is the target **language** (same name the daemon uses) and `--common` is the communication language; the scaffold **destination** is `--project-dir`, not `--target`. (`--lang` is still accepted as a hidden alias for `--target`.) `--output-device` is the speaker chosen in step 3 (required by this skill's flow) and is baked into the Stop hook in `.claude/settings.json`. This writes `CLAUDE.md`, `.claude/settings.json`, `scripts/speak_lang.py`, `scripts/push_to_talk.py`, and `scripts/inject_transcript.py` into the project dir. It also pip-installs `edge-tts`, the voice-in deps (`numpy sounddevice scipy pynput pywinauto pyperclip`), and `miniaudio` (for output-device playback) if missing. Pass `--no-voice-in` to skip the push-to-talk pieces (TTS-only setup — then only the output device is needed). `--gpu` provisions the whisper.cpp backend after scaffold (delegates to `provision_whisper.py`); omit it to keep binaries bring-your-own.
 
 6. **Confirm next steps** with the user: open the project dir in a fresh Claude Code session (or reload `/config` if already inside), then say hi — the assistant will greet them in the target language (with notes in the common language) using the agreed tag convention.
 
@@ -63,7 +71,7 @@ Trigger when the user says any of:
    - Before spawning, kill any prior instance to avoid duplicate keyboard listeners (use the same PowerShell command from step 0).
    - Spawn detached so it survives this turn. From Claude Code's Bash tool, use `run_in_background=true` with the microphone chosen in step 3: `py "<project-dir>\\scripts\\push_to_talk.py" --target <target_code> --common <common_code> --input-device "<name|index>"`.
    - Confirm to the user that the daemon is running and which keys to hold: **F9** for the target language (with IPA), **F10** for the common language (text only). Remind them they may need to set `--window-title-re` if the auto-submit picks the wrong window; tell them to run with `--list-windows` once to see candidates. The keys are configurable via `--target-hotkey` / `--common-hotkey`, and the microphone via `--input-device` (list options with `--list-devices`).
-   - **Important:** the daemon will not be functional until the user has manually installed the binary dependencies (`whisper-cli.exe`, the ggml model, and `espeak-ng.exe`) — see README's "Voice input — binary dependencies" section. The Python scaffold is ready; the binaries are BYO.
+   - **Important:** if you ran the GPU provisioning step (step 3b / `--gpu`), these binaries are already installed. Otherwise — or with `--no-voice-in` — they remain bring-your-own; see the README's "Voice input — binary dependencies" section.
 
 ## Tag convention
 
@@ -78,4 +86,4 @@ Edit `voices.json`. Add an object with `name`, `code`, `iso`, `voice` fields. To
 - Windows (Stop hook uses Windows MCI for MP3 playback; voice-in uses Windows-specific window automation via pywinauto. Linux/Mac support is TODO)
 - Python 3.9+
 - Internet access (edge-tts uses Microsoft's online TTS endpoint; Whisper model + espeak-ng are local once installed)
-- For voice-in only: ~1.5 GB of binary deps the user provisions manually — whisper.cpp + a ggml Whisper model + espeak-ng. See README "Voice input — binary dependencies".
+- For voice-in only: ~1.5 GB of binary deps — whisper.cpp + a ggml Whisper model + espeak-ng — provisioned once via `--gpu auto` (auto-detects the card) or manually per the README "Voice input — binary dependencies".

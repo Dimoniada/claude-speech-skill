@@ -191,6 +191,15 @@ def main(argv: list[str]) -> int:
         action="store_true",
         help="skip the voice-in pipeline (push_to_talk.py, inject_transcript.py, voice-in pip deps). TTS Stop hook is still set up.",
     )
+    parser.add_argument(
+        "--gpu",
+        choices=["auto", "cpu", "cuda", "vulkan"],
+        help="after scaffold, provision the whisper.cpp backend for the detected/chosen "
+             "GPU (delegates to provision_whisper.py): auto detects, or force cpu/cuda/vulkan. "
+             "Ignored with --no-voice-in. "
+             "Runs immediately; preview the plan first with: "
+             "py provision_whisper.py --project-dir <dir> --gpu auto --detect-only.",
+    )
     args = parser.parse_args(argv)
 
     voices = load_voices()
@@ -294,14 +303,21 @@ def main(argv: list[str]) -> int:
         f"{entry['name']} and write its notes in {common_entry['name']}."
     )
     if not args.no_voice_in:
-        print(
-            "\nVoice-in scaffolded. Before you can use F9 push-to-talk you must also\n"
-            "install the binary dependencies (NOT shipped via pip):\n"
-            "  - whisper.cpp        -> tools/whisper.cpp/bin/Release/whisper-cli.exe\n"
-            "  - whisper model      -> tools/whisper.cpp/models/ggml-medium-q5_0.bin (or similar)\n"
-            "  - espeak-ng (IPA)    -> tools/espeak-ng/espeak-ng.exe\n"
-            "See the README's 'Voice input — binary dependencies' section for exact commands."
-        )
+        if args.gpu:
+            import provision_whisper
+            rc = provision_whisper.main(["--project-dir", str(project_dir), "--gpu", args.gpu])
+            if rc != 0:
+                return rc
+        else:
+            print(
+                "\nVoice-in scaffolded. Before you can use F9 push-to-talk you must also\n"
+                "install the binary dependencies (NOT shipped via pip):\n"
+                "  - whisper.cpp        -> tools/whisper.cpp/bin/Release/whisper-cli.exe\n"
+                "  - whisper model      -> tools/whisper.cpp/models/ggml-medium-q5_0.bin (or similar)\n"
+                "  - espeak-ng (IPA)    -> tools/espeak-ng/espeak-ng.exe\n"
+                "Or run automatically: py install.py ... --gpu auto (detects your card).\n"
+                "See the README's 'Voice input — binary dependencies' section for exact commands."
+            )
     return 0
 
 
