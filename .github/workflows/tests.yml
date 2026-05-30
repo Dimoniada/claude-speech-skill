@@ -1,0 +1,37 @@
+name: tests
+
+# The skill is Windows-only (Stop hook uses Windows MCI; voice-in uses pywinauto),
+# so the suite runs on windows-latest. push_to_talk.py sys.exit(2)s on import if
+# its third-party deps are missing, so we install them before running.
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install voice-in deps (required to import push_to_talk)
+        run: python -m pip install --upgrade pip numpy sounddevice scipy pynput pywinauto pyperclip
+
+      - name: Run test suite
+        shell: pwsh
+        run: |
+          # Each tests/test_*.py has a built-in runner that exits non-zero on any
+          # failing assertion (the repo's documented "no pytest" path). Run them
+          # all and fail the job if any file reports a failure.
+          $failed = 0
+          Get-ChildItem tests/test_*.py | ForEach-Object {
+            Write-Host "### $($_.Name)"
+            python $_.FullName
+            if ($LASTEXITCODE -ne 0) { $failed = 1 }
+          }
+          if ($failed -ne 0) { Write-Error "one or more test files failed"; exit 1 }
