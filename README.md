@@ -148,7 +148,7 @@ You can also test output routing directly:
 py scripts\speak_lang.py --list-devices
 ```
 
-### Disabling / stopping the daemon
+### Turning voice off and back on
 
 In a Claude Code session, the skill responds to a control argument:
 
@@ -156,9 +156,16 @@ In a Claude Code session, the skill responds to a control argument:
 /claude-speech off
 ```
 
-This finds every running `push_to_talk.py` daemon, terminates it, and clears any pending `latest_transcript.txt` so the fallback hook doesn't keep re-injecting stale content. Aliases: `stop`, `kill`.
+This is a full off switch for **both** directions of voice:
 
-To re-enable, run `py …\scripts\push_to_talk.py --target … --common …` in a fresh terminal, or just invoke `/claude-speech <target> <common>` again — the skill auto-spawns the daemon as step 6 of its setup.
+- **Voice in** — terminates every running `push_to_talk.py` daemon and clears any pending `latest_transcript.txt` so the fallback hook doesn't keep re-injecting stale content.
+- **Voice out** — runs `toggle_voice.py --off`, which surgically removes the `speak_lang.py` Stop hook from `.claude/settings.json` (your other hooks and settings are left untouched) and stashes an exact copy in `.claude/speak_lang.hook.json`. Spoken replies stop firing even if Claude still emits `<{code}>` tags. (The hook fires every turn once installed — there's no runtime "skill is active" state in Claude Code — so removing it is the only honest way to silence output.)
+
+Aliases: `stop`, `kill`.
+
+**To re-enable, just invoke `/claude-speech` again with no language argument.** When a stash exists, the skill restores the Stop hook from it and restarts the daemon — no re-interview, same language/voice/device as before.
+
+Invoking it *with* a language (`/claude-speech German Russian`) instead runs a full re-initialization for that language and turns voice back on. The skill recovers your previous settings (language, voice, devices) and offers them as defaults, so you only answer what's changing. You never need to type `--force` — it's an internal installer flag the skill manages on your behalf when an existing setup has to be regenerated.
 
 ## Voice input — binary dependencies
 

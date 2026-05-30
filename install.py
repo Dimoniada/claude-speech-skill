@@ -120,6 +120,46 @@ def validate_existing_settings(path: Path, target: Path) -> None:
         )
 
 
+def ensure_stop_hook(settings_path: Path, rendered_settings_text: str) -> None:
+    """When settings.json already exists and we don't overwrite it, make sure the
+    live speak_lang Stop hook is actually present.
+
+    This matters because `/claude-speech off` removes that hook (stashing a copy).
+    An install invoked with language args clearly means the user wants the tutor
+    set up, so leaving spoken output muted would be surprising. If the hook is
+    absent we merge the freshly-rendered one in (preserving every other key); if
+    a speak_lang hook is already there we leave it untouched — changing its voice
+    or device is a --force operation, by the same no-clobber rule as the rest of
+    the installer."""
+    try:
+        existing = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"  WARNING: could not parse {settings_path} to ensure Stop hook: {exc}", file=sys.stderr)
+        return
+
+    existing_stop = (existing.get("hooks") or {}).get("Stop") or []
+    has_speak = any(
+        isinstance(h.get("command"), str) and "speak_lang.py" in h["command"]
+        for group in existing_stop
+        for h in (group.get("hooks") or [])
+    )
+    if has_speak:
+        return  # voice already on — respect no-clobber (use --force to change it)
+
+    desired_stop = (json.loads(rendered_settings_text).get("hooks") or {}).get("Stop") or []
+    if not desired_stop:
+        return
+
+    hooks_root = existing.setdefault("hooks", {})
+    hooks_root.setdefault("Stop", []).extend(desired_stop)
+    settings_path.write_text(
+        json.dumps(existing, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    print(f"  re-added speak_lang Stop hook to existing {settings_path}")
+
+
 def ensure_pip_packages(packages: list[str], group_label: str) -> None:
     """pip-install any of `packages` that aren't already importable.
 
@@ -264,9 +304,20 @@ def main(argv: list[str]) -> int:
     # .claude/settings.json
     settings_tpl = (TPL_DIR / "settings.json.tmpl").read_text(encoding="utf-8")
     settings_path = project_dir / ".claude" / "settings.json"
-    wrote_settings = write_file(settings_path, render(settings_tpl, mapping), args.force)
+    rendered_settings = render(settings_tpl, mapping)
+    wrote_settings = write_file(settings_path, rendered_settings, args.force)
     if not wrote_settings and settings_path.exists():
+        # Existing file we didn't overwrite: guarantee the Stop hook is present
+        # (it may have been removed by `/claude-speech off`), then sanity-check it.
+        ensure_stop_hook(settings_path, rendered_settings)
         validate_existing_settings(settings_path, project_dir)
+    # Any install invoked with language args supersedes a prior `/claude-speech off`,
+    # so drop the stash regardless of whether we wrote or merged — the live hook is
+    # now in settings.json and the stash would only desync the on/off toggle.
+    stash = project_dir / ".claude" / "speak_lang.hook.json"
+    if stash.exists():
+        stash.unlink()
+        print(f"  cleared voice-off stash (superseded by install): {stash}")
 
     # scripts/ — copy each script verbatim (no template substitutions)
     scripts_to_copy = ["speak_lang.py"]
