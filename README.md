@@ -21,7 +21,7 @@ The skill scaffolds these files into your project:
 
 **Output flow.** When Claude finishes a reply, the Stop hook reads the transcript, pulls every `<{code}>...</{code}>` block (where `{code}` is the ISO 639-1 code of the language you're learning), and pipes them to `edge-tts` for playback.
 
-**Input flow.** The push-to-talk daemon runs in a separate terminal. Hold **F9** (learned language) or **F10** (native language) anywhere — both are global hotkeys → it records 16 kHz mono PCM → release the key → it calls a local `whisper-cli.exe`, forcing the language bound to the key you held (no auto-detection) → for the learned language it then runs `espeak-ng --ipa` to render IPA → finally it focuses your Claude Code window and pastes the payload (`text` alone for the native language, `text\n[IPA]` for the learned one) + Enter. If window-focus is blocked by Windows 11 anti-focus-stealing, it falls back to writing `recordings/latest_transcript.txt`, and the `UserPromptSubmit` hook injects it on your next manual Enter.
+**Input flow.** The push-to-talk daemon runs in a separate terminal. Hold **F9** (learned language) or **F10** (native language) anywhere — both are global hotkeys → it records 16 kHz mono PCM → release the key → it sends the clip to a local resident `whisper-server` (started once and kept warm in VRAM), forcing the language bound to the key you held (no auto-detection) → for the learned language it then runs `espeak-ng --ipa` to render IPA → finally it focuses your Claude Code window and pastes the payload (`text` alone for the native language, `text\n[IPA]` for the learned one) + Enter. If window-focus is blocked by Windows 11 anti-focus-stealing, it falls back to writing `recordings/latest_transcript.txt`, and the `UserPromptSubmit` hook injects it on your next manual Enter.
 
 > **Focusing the input.** The daemon focuses the chat input box for you. The Claude app is Electron and exposes its whole web view as a single accessibility node, so there's no distinct text control to target by type — instead the daemon locates the input as the focusable container in the bottom strip of the window (a UIA `Group` spanning most of the width) and calls `set_focus` on it, which lands the caret in the message box without touching your mouse. This works even if the caret was on a button or the sidebar beforehand. **If a transcript ever fails to appear in the input, the auto-focus couldn't find the box** (unusual window layout, a Claude UI change, or more than one matching container) — click the input box once yourself and try again; with the caret already there the paste lands regardless.
 
@@ -200,7 +200,7 @@ Invoke-WebRequest -Uri "https://github.com/ggerganov/whisper.cpp/releases/downlo
 Expand-Archive -Path $zip -DestinationPath "$proj\tools\whisper.cpp\bin" -Force
 Remove-Item $zip
 
-# Result: $proj\tools\whisper.cpp\bin\Release\whisper-cli.exe (plus DLLs)
+# Result: $proj\tools\whisper.cpp\bin\Release\whisper-server.exe (plus DLLs)
 ```
 
 ### 2. Whisper model — ~540 MB (multilingual, quantized medium)
@@ -252,7 +252,7 @@ your-project\
 ├── logs\
 └── tools\
     ├── whisper.cpp\
-    │   ├── bin\Release\whisper-cli.exe  (+ ggml-*.dll, whisper.dll, …)
+    │   ├── bin\Release\whisper-server.exe  (+ ggml-*.dll, whisper.dll, …)
     │   └── models\ggml-medium-q5_0.bin
     └── espeak-ng\
         ├── espeak-ng.exe
@@ -294,7 +294,7 @@ Invoke-WebRequest -Uri "https://github.com/ggerganov/whisper.cpp/releases/downlo
 
 Expand-Archive -Path $zip -DestinationPath "$proj\tools\whisper.cpp\bin" -Force
 Remove-Item $zip
-# Result: $proj\tools\whisper.cpp\bin\Release\whisper-cli.exe with CUDA support
+# Result: $proj\tools\whisper.cpp\bin\Release\whisper-server.exe with CUDA support
 ```
 
 **Step 3 — install cuDNN (Option B only).** The CUDA 12.4 zip already bundles cuDNN, so skip this step if you used Option A. For Option B (CUDA 11.8), you need cuDNN's runtime libraries. The simplest way is to pip-install the bundled wheels into the same Python the daemon uses:
@@ -303,26 +303,26 @@ Remove-Item $zip
 py -m pip install --user nvidia-cublas-cu11 nvidia-cudnn-cu11
 ```
 
-Alternatively, download cuDNN 8.x for CUDA 11 from [developer.nvidia.com/cudnn](https://developer.nvidia.com/cudnn-downloads) and copy `cudnn*.dll` next to `whisper-cli.exe`.
+Alternatively, download cuDNN 8.x for CUDA 11 from [developer.nvidia.com/cudnn](https://developer.nvidia.com/cudnn-downloads) and copy `cudnn*.dll` next to `whisper-server.exe`.
 
-**Step 4 — verify.** Run the binary against any 16 kHz WAV:
+**Step 4 — verify.** Start the server once and watch its startup banner:
 
 ```powershell
-& "$proj\tools\whisper.cpp\bin\Release\whisper-cli.exe" `
+& "$proj\tools\whisper.cpp\bin\Release\whisper-server.exe" `
     -m "$proj\tools\whisper.cpp\models\ggml-medium-q5_0.bin" `
-    -f any_16khz.wav -l en -nt -np
+    --host 127.0.0.1 --port 8910
 ```
 
-On the first run it should print a line like:
+As it loads the model it should print a line like:
 
 ```
 ggml_cuda_init: found 1 CUDA devices:
   Device 0: NVIDIA GeForce RTX 4070, compute capability 8.9, VMM: yes
 ```
 
-That's how you know CUDA is active. If you see no such line (or you see `ggml_vulkan: …` from a leftover Vulkan build), the swap didn't take — re-check the zip extracted to the right path.
+followed by `whisper server listening at http://127.0.0.1:8910`. That's how you know CUDA is active; press **Ctrl+C** to stop it (the push-to-talk daemon starts and stops this server for you automatically — this manual run is only to confirm the GPU backend). If you see no `ggml_cuda_init` line (or you see `ggml_vulkan: …` from a leftover Vulkan build), the swap didn't take — re-check the zip extracted to the right path.
 
-If `whisper-cli.exe` fails to start with `Could not load library cudnn_ops_infer64_*.dll` or similar, cuDNN isn't on the DLL search path. Re-do Step 3, or fall back to Option A which bundles it.
+If `whisper-server.exe` fails to start with `Could not load library cudnn_ops_infer64_*.dll` or similar, cuDNN isn't on the DLL search path. Re-do Step 3, or fall back to Option A which bundles it.
 
 ### Optional: Vulkan build (any GPU) — for AMD/Intel, or NVIDIA users who prefer it
 
@@ -353,7 +353,7 @@ Remove-Item "$proj\tools\whisper.cpp\bin\Release" -Recurse -Force
 Copy-Item "$proj\tools\whisper.cpp-src\build\bin\Release" "$proj\tools\whisper.cpp\bin\Release" -Recurse
 ```
 
-CMake's configure output should include `-- Found Vulkan` and `-- Including Vulkan backend`. The first run of `whisper-cli.exe` after the swap will print `ggml_vulkan: Found N Vulkan devices: ...` — that's how you know GPU is active.
+CMake's configure output should include `-- Found Vulkan` and `-- Including Vulkan backend`. The first run of `whisper-server.exe` after the swap will print `ggml_vulkan: Found N Vulkan devices: ...` — that's how you know GPU is active.
 
 This path is automated by `py install.py … --gpu vulkan` (or `--gpu auto` on an AMD/Intel box) — see "Automatic option" above. The manual steps here are the fallback and the reference for what the automation does.
 
@@ -464,7 +464,7 @@ py scripts\push_to_talk.py --target nl --common ru --window-title-re "^Claude-Tu
 **`ERROR: missing dependency '<name>' for this Python interpreter.`**
 You ran the daemon with a different `py` interpreter than the one `install.py` installed deps into. Run the suggested `py -m pip install --user …` line from the error message — it uses the same interpreter as the failing daemon launch.
 
-**`whisper-cli.exe not found` / `espeak-ng.exe not found`.**
+**`whisper-server.exe not found` / `espeak-ng.exe not found`.**
 The Python scaffold is set up but the binary deps aren't. Follow the "Voice input — binary dependencies" section above.
 
 **Whisper transcribes the wrong language.**

@@ -215,7 +215,7 @@ def write_backend_marker(project_dir, backend: str) -> None:
 
 
 def whisper_present(project_dir, backend: str) -> bool:
-    exe = _release_dir(project_dir) / "whisper-cli.exe"
+    exe = _release_dir(project_dir) / "whisper-server.exe"
     return exe.exists() and read_backend_marker(project_dir) == backend
 
 
@@ -416,6 +416,15 @@ def build_vulkan(project_dir, rb: Rollbacker) -> None:
     rb.track(release)
     release.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(src / "build" / "bin" / "Release", release)
+    # The push-to-talk daemon requires whisper-server.exe; fail loudly here
+    # (caller rolls back) rather than letting the daemon fail at startup.
+    server_exe = release / "whisper-server.exe"
+    if not server_exe.is_file():
+        raise RuntimeError(
+            f"Vulkan build finished but {server_exe.name} is missing from {release}. "
+            "The whisper.cpp server target did not build — see "
+            "logs/provision_whisper.log for the cmake output."
+        )
 
 
 DEFAULT_MODEL = "ggml-medium-q5_0"
@@ -451,7 +460,7 @@ def provision(project_dir, backend: str, gpu: GpuInfo, model_name: str) -> None:
             if gpu.cuda_version and gpu.cuda_version.split(".")[0] == "11":
                 msg = ("WARNING: CUDA 11.x detected. The 11.8 whisper build does not bundle "
                        "cuDNN; install cuDNN 8.x manually (see README 'Optional: CUDA build') "
-                       "or whisper-cli.exe will fail to start.")
+                       "or whisper-server.exe will fail to start.")
                 logger.warning(msg)
                 print(msg, file=sys.stderr)
             if not whisper_present(project_dir, backend):
