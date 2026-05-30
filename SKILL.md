@@ -28,8 +28,13 @@ Trigger when the user says any of:
         powershell -NoProfile -Command 'Get-CimInstance Win32_Process | Where-Object { $_.Name -in @("py.exe","python.exe","pythonw.exe") -and $_.CommandLine -like "*push_to_talk.py*" } | ForEach-Object { Write-Host "killed PID $($_.ProcessId)"; Stop-Process -Id $_.ProcessId -Force }'
         ```
         **Crucially: the filter MUST require the process Name to be one of `py.exe` / `python.exe` / `pythonw.exe`.** Without that restriction, the filter also matches shell wrappers that happen to have `push_to_talk.py` literally in their command line (e.g. the very PowerShell invocation you're running) and will pollute the result list.
-     2. Delete `<project_root>/recordings/latest_transcript.txt` if it exists, so the UserPromptSubmit hook doesn't keep re-injecting the last transcript on subsequent manual Enters now that the daemon isn't writing fresh ones.
-     3. Report the PIDs killed (or "no daemons were running") and confirm the stale transcript was cleared.
+     2. Terminate the resident `whisper-server.exe` the daemon started (it loads the model into VRAM and does **not** die with the daemon when force-killed). Match only **this project's** server by requiring its command line to reference the project's `tools\whisper.cpp` path, so other projects' servers are left running:
+        ```
+        powershell -NoProfile -Command 'Get-CimInstance Win32_Process | Where-Object { $_.Name -eq "whisper-server.exe" -and $_.CommandLine -like "*<project_root>\tools\whisper.cpp*" } | ForEach-Object { Write-Host "killed server PID $($_.ProcessId)"; Stop-Process -Id $_.ProcessId -Force }'
+        ```
+        Substitute `<project_root>` with the actual project directory. (If voice-in was never set up, or the daemon never started, the filter simply matches nothing.)
+     3. Delete `<project_root>/recordings/latest_transcript.txt` if it exists, so the UserPromptSubmit hook doesn't keep re-injecting the last transcript on subsequent manual Enters now that the daemon isn't writing fresh ones.
+     4. Report the PIDs killed (or "no daemons were running") and confirm the stale transcript was cleared.
    - Any other argument is treated as a language name or ISO code — proceed with steps 1+ below.
 
 1. **Resolve the two languages.** The skill takes two positional arguments: `/claude-speech <target> <common>`.
@@ -71,6 +76,7 @@ Trigger when the user says any of:
    - Before spawning, kill any prior instance to avoid duplicate keyboard listeners (use the same PowerShell command from step 0).
    - Spawn detached so it survives this turn. From Claude Code's Bash tool, use `run_in_background=true` with the microphone chosen in step 3: `py "<project-dir>\\scripts\\push_to_talk.py" --target <target_code> --common <common_code> --input-device "<name|index>"`.
    - Confirm to the user that the daemon is running and which keys to hold: **F9** for the target language (with IPA), **F10** for the common language (text only). Remind them they may need to set `--window-title-re` if the auto-submit picks the wrong window; tell them to run with `--list-windows` once to see candidates. The keys are configurable via `--target-hotkey` / `--common-hotkey`, and the microphone via `--input-device` (list options with `--list-devices`).
+   - **Transcription backend:** the daemon auto-starts a resident `whisper-server` (bound to `127.0.0.1:8910`) that keeps the model + CUDA context warm in VRAM, so repeat transcriptions take well under a second instead of a ~3.5 s per-clip cold start. It is shut down when the daemon stops (or by `/claude-speech off`, per step 0). This is the only transcription backend — if the server can't start (e.g. the port is taken or binaries are missing) the daemon exits with an actionable error; pass `--server-port <n>` to change the port.
    - **Important:** if you ran the GPU provisioning step (step 3b / `--gpu`), these binaries are already installed. Otherwise — or with `--no-voice-in` — they remain bring-your-own; see the README's "Voice input — binary dependencies" section.
 
 ## Tag convention

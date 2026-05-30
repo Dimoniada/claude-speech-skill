@@ -312,7 +312,7 @@ def main(argv: list[str]) -> int:
             print(
                 "\nVoice-in scaffolded. Before you can use F9 push-to-talk you must also\n"
                 "install the binary dependencies (NOT shipped via pip):\n"
-                "  - whisper.cpp        -> tools/whisper.cpp/bin/Release/whisper-cli.exe\n"
+                "  - whisper.cpp        -> tools/whisper.cpp/bin/Release/whisper-server.exe\n"
                 "  - whisper model      -> tools/whisper.cpp/models/ggml-medium-q5_0.bin (or similar)\n"
                 "  - espeak-ng (IPA)    -> tools/espeak-ng/espeak-ng.exe\n"
                 "Or run automatically: py install.py ... --gpu auto (detects your card).\n"

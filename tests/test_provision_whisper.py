@@ -188,17 +188,17 @@ def test_rollback_restores_backup():
     try:
         original = base / "Release"
         original.mkdir()
-        (original / "whisper-cli.exe").write_text("OLD", encoding="utf-8")
+        (original / "whisper-server.exe").write_text("OLD", encoding="utf-8")
         backup = base / "Release.bak"
         original.rename(backup)            # simulate "move old aside"
         rb = pw.Rollbacker()
         rb.track_backup(original, backup)
         original.mkdir()                   # simulate new (failed) install
-        (original / "whisper-cli.exe").write_text("NEW-BROKEN", encoding="utf-8")
+        (original / "whisper-server.exe").write_text("NEW-BROKEN", encoding="utf-8")
         rb.track(original)
         rb.rollback()
         assert original.exists()
-        assert (original / "whisper-cli.exe").read_text(encoding="utf-8") == "OLD"
+        assert (original / "whisper-server.exe").read_text(encoding="utf-8") == "OLD"
         assert not backup.exists()
     finally:
         _sh.rmtree(base, ignore_errors=True)
@@ -223,7 +223,7 @@ def test_whisper_present_requires_matching_backend():
     try:
         rel = base / "tools" / "whisper.cpp" / "bin" / "Release"
         rel.mkdir(parents=True)
-        (rel / "whisper-cli.exe").write_text("x", encoding="utf-8")
+        (rel / "whisper-server.exe").write_text("x", encoding="utf-8")
         pw.write_backend_marker(base, "cpu")
         assert pw.whisper_present(base, "cpu") is True
         assert pw.whisper_present(base, "vulkan") is False  # different backend

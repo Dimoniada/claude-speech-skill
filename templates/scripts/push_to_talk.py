@@ -10,8 +10,9 @@ Loops forever:
   1. Wait for one of two hotkeys: the target key (default F9) or the common
      key (default F10).
   2. While the key is held, capture mono 16 kHz audio from the default mic.
-  3. On release, transcribe via whisper.cpp (whisper-cli) forcing the language
-     bound to the key you held.
+  3. On release, transcribe via a resident whisper-server — started once on
+     launch and kept warm in VRAM, so repeat transcriptions take well under a
+     second — forcing the language bound to the key you held.
   4. If you held the target key, append an IPA pronunciation line; if you held
      the common key, keep plain text.
   5. Save the recording as recordings/rec_{lang}_{NNNN:04d}.wav.
@@ -34,9 +35,13 @@ import argparse
 import json
 import logging
 import re
+import socket
 import subprocess
 import sys
 import threading
+import urllib.error
+import urllib.request
+import uuid
 from pathlib import Path
 
 # IPA contains non-ASCII characters (ˈ, ɪ, ŋ, …). Force UTF-8 on stdout/stderr
@@ -84,8 +89,15 @@ LATEST_TRANSCRIPT = RECORDINGS_DIR / "latest_transcript.txt"
 
 SAMPLE_RATE = 16000  # whisper.cpp expects 16 kHz mono
 WHISPER_DIR = PROJECT_ROOT / "tools" / "whisper.cpp"
-DEFAULT_WHISPER_CLI = WHISPER_DIR / "bin" / "Release" / "whisper-cli.exe"
+DEFAULT_WHISPER_SERVER = WHISPER_DIR / "bin" / "Release" / "whisper-server.exe"
 DEFAULT_MODEL = WHISPER_DIR / "models" / "ggml-medium-q5_0.bin"
+
+# A resident whisper-server keeps the model + CUDA context warm in VRAM so each
+# transcription is just an HTTP round-trip (~0.3 s) instead of a per-clip cold
+# start (~3.5 s with the medium model). Bound to localhost only.
+DEFAULT_SERVER_HOST = "127.0.0.1"
+DEFAULT_SERVER_PORT = 8910          # avoids whisper-server's own default of 8080
+SERVER_LOG_PATH = PROJECT_ROOT / "logs" / "whisper_server.log"
 
 ESPEAK_DIR = PROJECT_ROOT / "tools" / "espeak-ng"
 DEFAULT_ESPEAK_NG = ESPEAK_DIR / "espeak-ng.exe"
@@ -249,9 +261,10 @@ def format_hotkey_name(hotkey: keyboard.Key | keyboard.KeyCode) -> str:
 
 
 def parse_whisper_json(json_text: str) -> tuple[str, str]:
-    """Extract (transcription_text, detected_lang_code) from whisper-cli JSON.
+    """Extract (transcription_text, detected_lang_code) from whisper verbose JSON.
 
-    whisper.cpp's -oj output looks like:
+    whisper.cpp's verbose JSON (server response_format=verbose_json, or the CLI's
+    -oj) looks like:
         {"result": {"language": "ru"},
          "transcription": [{"text": " ..."}, ...]}
     Returns ("", "") if the structure is missing/unparseable.
@@ -270,54 +283,169 @@ def parse_whisper_json(json_text: str) -> tuple[str, str]:
     return text, lang
 
 
-def run_whisper(
-    wav_path: Path, lang: str, model: Path, whisper_cli: Path
-) -> tuple[str, str]:
-    """Invoke whisper-cli; return (transcribed_text, detected_lang_code).
+# ---------------------------------------------------------------------------
+# Resident whisper-server backend. Keeping one server process alive avoids
+# reloading the model + re-initialising the CUDA context on every clip, which
+# is what made the old per-call whisper-cli path slow (~3.5 s vs <1 s here).
+# ---------------------------------------------------------------------------
 
-    `lang` may be "auto" to let whisper detect the language, or an ISO code to
-    force it. The detected/forced language and text are read from whisper's
-    JSON output (-oj), which is more reliable than parsing stderr. Stdout is
-    used as a fallback for the text if the JSON is missing.
+def start_whisper_server(
+    server_bin: Path, model: Path, host: str, port: int
+) -> subprocess.Popen | None:
+    """Launch whisper-server detached, logging to logs/whisper_server.log.
+
+    Returns the Popen handle, or None if the process couldn't be spawned. The
+    server loads the model once and serves POST /inference for the daemon's
+    lifetime; readiness is confirmed separately via wait_for_server().
     """
-    out_prefix = wav_path.with_suffix("")        # whisper appends ".json"
-    json_path = wav_path.with_suffix(".json")
+    SERVER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
-        str(whisper_cli),
+        str(server_bin),
         "-m", str(model),
-        "-f", str(wav_path),
-        "-l", lang,
-        "-nt",           # no timestamps in output
-        "-np",           # no progress prints
-        "-oj",           # write JSON (carries the detected language)
-        "-of", str(out_prefix),
+        "--host", host,
+        "--port", str(port),
+        "-nt",  # no timestamps in the transcription text
     ]
-    logging.info("running whisper-cli: %s", " ".join(cmd))
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    if result.returncode != 0:
-        logging.error("whisper-cli failed (rc=%d):\n%s", result.returncode, result.stderr)
-        return "", ""
-
-    text, detected = "", ""
+    logging.info("starting whisper-server: %s", " ".join(cmd))
+    # CREATE_NO_WINDOW keeps the server from popping a console window when the
+    # daemon itself is launched detached.
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
-        text, detected = parse_whisper_json(json_path.read_text(encoding="utf-8"))
+        log_fh = open(SERVER_LOG_PATH, "w", encoding="utf-8", errors="replace")
+        proc = subprocess.Popen(
+            cmd,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            creationflags=creationflags,
+        )
     except OSError as exc:
-        logging.warning("could not read whisper JSON %s: %s", json_path, exc)
-    finally:
-        try:
-            json_path.unlink()
-        except OSError:
-            pass
+        logging.error("could not start whisper-server: %s", exc)
+        return None
+    return proc
 
-    if not text:
-        text = result.stdout.strip()
-    return text, detected
+
+def wait_for_server(host: str, port: int, timeout: float = 30.0) -> bool:
+    """Poll the server until it accepts connections and the model is loaded.
+
+    whisper-server opens its TCP port slightly before the model finishes
+    loading, so we probe the HTTP endpoint (which only answers once the model
+    is ready) rather than just the socket. Returns True once ready.
+    """
+    deadline = time.time() + timeout
+    url = f"http://{host}:{port}/"
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=2.0):
+                return True
+        except urllib.error.HTTPError:
+            # Any HTTP status means the server is up and answering.
+            return True
+        except (urllib.error.URLError, socket.timeout, ConnectionError, OSError):
+            time.sleep(0.3)
+    return False
+
+
+def transcribe_via_server(
+    wav_path: Path, lang: str, host: str, port: int
+) -> str:
+    """Transcribe a clip through the resident whisper-server.
+
+    POSTs the WAV as multipart/form-data to /inference, forcing the language.
+    Returns the transcription text, or "" on any error (the caller skips the
+    clip and logs). Built with stdlib only (no requests dependency).
+    """
+    try:
+        audio = wav_path.read_bytes()
+    except OSError as exc:
+        logging.error("could not read capture for server transcription: %s", exc)
+        return ""
+
+    boundary = uuid.uuid4().hex
+    pre = []
+    pre.append(f"--{boundary}\r\n")
+    pre.append(
+        'Content-Disposition: form-data; name="file"; '
+        f'filename="{wav_path.name}"\r\n'
+    )
+    pre.append("Content-Type: audio/wav\r\n\r\n")
+    fields = {"language": lang, "response_format": "json", "temperature": "0"}
+    post = ["\r\n"]
+    for key, val in fields.items():
+        post.append(f"--{boundary}\r\n")
+        post.append(f'Content-Disposition: form-data; name="{key}"\r\n\r\n')
+        post.append(f"{val}\r\n")
+    post.append(f"--{boundary}--\r\n")
+    body = "".join(pre).encode("utf-8") + audio + "".join(post).encode("utf-8")
+
+    req = urllib.request.Request(
+        f"http://{host}:{port}/inference",
+        data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60.0) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+    except (urllib.error.URLError, socket.timeout, ConnectionError, OSError) as exc:
+        logging.error("whisper-server request failed: %s", exc)
+        return ""
+
+    # /inference with response_format=json returns {"text": "..."}; some builds
+    # return verbose JSON with a "transcription" list. Handle both, then fall
+    # back to the raw body.
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return raw.strip()
+    if isinstance(data, dict):
+        if isinstance(data.get("text"), str):
+            return data["text"].strip()
+        text, _ = parse_whisper_json(raw)
+        if text:
+            return text
+    return raw.strip()
+
+
+def stop_whisper_server(proc: subprocess.Popen | None) -> None:
+    """Terminate the resident server so it doesn't keep holding VRAM."""
+    if proc is None or proc.poll() is not None:
+        return
+    logging.info("stopping whisper-server (pid=%s)", proc.pid)
+    try:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    except OSError as exc:
+        logging.warning("error stopping whisper-server: %s", exc)
+
+
+def kill_stale_whisper_servers(server_bin: Path) -> None:
+    """Kill orphaned whisper-server processes for THIS project before starting.
+
+    A daemon that was force-killed (e.g. via `/claude-speech off`) leaves its
+    server child running and holding VRAM. We match only servers whose command
+    line references this project's whisper.cpp tools dir, so other projects'
+    servers are left alone.
+    """
+    # PowerShell single-quoted strings take backslashes literally (only '' needs
+    # escaping), so the path goes in as-is; we just guard against stray quotes.
+    needle = str(server_bin.parent).lower().replace("'", "''")
+    ps = (
+        "Get-CimInstance Win32_Process | "
+        "Where-Object { $_.Name -eq 'whisper-server.exe' -and "
+        f"$_.CommandLine -and $_.CommandLine.ToLower().Contains('{needle}') }} | "
+        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
+    )
+    try:
+        subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logging.warning("could not sweep stale whisper-server processes: %s", exc)
 
 
 def to_ipa(
@@ -580,7 +708,9 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--common-hotkey", default=DEFAULT_COMMON_HOTKEY, help="hold to speak the COMMON language, forced transcription, no IPA (default: f10)")
     parser.add_argument("--hotkey", help=argparse.SUPPRESS)  # back-compat alias for --target-hotkey
     parser.add_argument("--model", type=Path, default=DEFAULT_MODEL, help="path to ggml whisper model")
-    parser.add_argument("--whisper-cli", type=Path, default=DEFAULT_WHISPER_CLI, help="path to whisper-cli.exe")
+    parser.add_argument("--whisper-server", type=Path, default=DEFAULT_WHISPER_SERVER, help="path to whisper-server.exe (resident transcription backend)")
+    parser.add_argument("--server-host", default=DEFAULT_SERVER_HOST, help=f"host for the resident whisper-server (default: {DEFAULT_SERVER_HOST})")
+    parser.add_argument("--server-port", type=int, default=DEFAULT_SERVER_PORT, help=f"port for the resident whisper-server (default: {DEFAULT_SERVER_PORT})")
     parser.add_argument("--espeak-ng", type=Path, default=DEFAULT_ESPEAK_NG, help="path to espeak-ng.exe (for IPA conversion)")
     parser.add_argument("--espeak-data", type=Path, default=DEFAULT_ESPEAK_DATA, help="path to espeak-ng-data dir")
     parser.add_argument(
@@ -646,8 +776,8 @@ def main(argv: list[str]) -> int:
         logging.error("--target and --common must differ (both were %r)", target)
         return 2
 
-    if not args.whisper_cli.is_file():
-        logging.error("whisper-cli not found: %s", args.whisper_cli)
+    if not args.whisper_server.is_file():
+        logging.error("whisper-server not found: %s", args.whisper_server)
         return 2
     if not args.model.is_file():
         logging.error("model not found: %s", args.model)
@@ -739,6 +869,32 @@ def main(argv: list[str]) -> int:
         print("Auto-submit DISABLED (--no-auto-submit). UserPromptSubmit hook will inject on manual Enter.", flush=True)
     print("=" * 60, flush=True)
 
+    # Bring up the resident whisper-server. It is the only transcription backend,
+    # so a failure to start is fatal (with an actionable message) rather than a
+    # silent fallback.
+    kill_stale_whisper_servers(args.whisper_server)
+    server_proc = start_whisper_server(
+        args.whisper_server, args.model, args.server_host, args.server_port
+    )
+    if server_proc is None or not wait_for_server(args.server_host, args.server_port):
+        logging.error("whisper-server failed to start on %s:%s", args.server_host, args.server_port)
+        stop_whisper_server(server_proc)
+        print(
+            f"ERROR: whisper-server failed to start at {args.server_host}:{args.server_port}.\n"
+            f"       See {SERVER_LOG_PATH} for details. Common causes: the port is\n"
+            f"       already in use (try --server-port <other>) or the binary/model is\n"
+            f"       missing. Provision binaries with `--gpu auto` (see README).",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 2
+    print(
+        f"  transcription: whisper-server (resident, warm) "
+        f"at {args.server_host}:{args.server_port}.",
+        flush=True,
+    )
+    print("=" * 60, flush=True)
+
     capture_path = RECORDINGS_DIR / "rec_capture.wav"
     try:
         while True:
@@ -754,9 +910,9 @@ def main(argv: list[str]) -> int:
             is_target = (lang == target)
             print(f"  captured {duration:.1f}s, transcribing forced '{lang}'...", flush=True)
 
-            text, _ = run_whisper(capture_path, lang, args.model, args.whisper_cli)
+            text = transcribe_via_server(capture_path, lang, args.server_host, args.server_port)
             if not text:
-                print("  [empty transcript — whisper-cli error, see log]\n", flush=True)
+                print("  [empty transcript — transcription error, see log]\n", flush=True)
                 continue
 
             # Persist the recording under the forced language code.
@@ -815,6 +971,8 @@ def main(argv: list[str]) -> int:
     except KeyboardInterrupt:
         print("\nbye", flush=True)
         return 0
+    finally:
+        stop_whisper_server(server_proc)
 
 
 if __name__ == "__main__":
