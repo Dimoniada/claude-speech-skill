@@ -178,6 +178,15 @@ The CPU/BLAS path below is the **default and recommended starting point** — it
 
 For most users the right order is: get CPU working first, then upgrade only if the latency annoys you in real use.
 
+**Automatic option.** Instead of the manual blocks below, run
+`py install.py … --gpu auto` (or `py provision_whisper.py --project-dir <dir> --gpu auto`).
+It detects your GPU and provisions the matching backend — NVIDIA gets the prebuilt CUDA zip,
+AMD/Intel compile Vulkan from source, otherwise CPU — plus the ggml model and espeak-ng.
+Use `--detect-only` first to see the plan (sizes, time, what's already installed) without
+downloading anything. Already-installed dependencies are skipped; any failure stops and rolls
+back the in-project artifacts it created (system SDKs are left in place). The manual steps below
+remain valid and are what `--gpu` automates.
+
 ### 1. whisper.cpp (CPU build) — ~16 MB
 
 ```powershell
@@ -346,7 +355,7 @@ Copy-Item "$proj\tools\whisper.cpp-src\build\bin\Release" "$proj\tools\whisper.c
 
 CMake's configure output should include `-- Found Vulkan` and `-- Including Vulkan backend`. The first run of `whisper-cli.exe` after the swap will print `ggml_vulkan: Found N Vulkan devices: ...` — that's how you know GPU is active.
 
-This entire path will eventually be automated as `install.py --gpu vulkan` (Phase 3 in the roadmap) and then as a pre-built CI binary download (Phase 4). Today it's manual.
+This path is automated by `py install.py … --gpu vulkan` (or `--gpu auto` on an AMD/Intel box) — see "Automatic option" above. The manual steps here are the fallback and the reference for what the automation does.
 
 ## Installation
 
