@@ -29,6 +29,20 @@ DEFAULT_RATE = "-10%"
 SCRIPT_DIR = Path(__file__).resolve().parent
 LOG_PATH = SCRIPT_DIR.parent / "logs" / "speak_lang.log"
 
+# When a device name matches multiple endpoints (the same hardware is exposed
+# once per Windows host API), prefer modern reliable APIs. PortAudio's MME
+# wrapper truncates names to 31 chars and can silently route Bluetooth audio
+# to nowhere; WASAPI is the modern endpoint and works for BT/USB/HDMI alike.
+_HOST_API_PREFERENCE = ("wasapi", "directsound", "mme", "wdmks")
+
+
+def _host_api_rank(name: str) -> int:
+    n = name.lower().replace("-", "").replace(" ", "")
+    for i, key in enumerate(_HOST_API_PREFERENCE):
+        if key in n:
+            return i
+    return len(_HOST_API_PREFERENCE)
+
 
 def setup_logging() -> None:
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -143,14 +157,33 @@ def resolve_output_device(spec: str | None) -> int | None:
     if not matches:
         raise ValueError(f"no output device name contains {spec!r}")
     if len(matches) > 1:
-        alts = ", ".join(f"[{i}] {devices[i]['name']}" for i in matches)
-        logging.info("output device %r matched several; using lowest index. Candidates: %s", spec, alts)
+        matches.sort(key=lambda i: (
+            _host_api_rank(sd.query_hostapis(devices[i]["hostapi"])["name"]),
+            i,
+        ))
+        alts = ", ".join(
+            f"[{i}] {devices[i]['name']} ({sd.query_hostapis(devices[i]['hostapi'])['name']})"
+            for i in matches
+        )
+        chosen = matches[0]
+        logging.info(
+            "output device %r matched several; picked [%d] %s (%s). Candidates: %s",
+            spec, chosen, devices[chosen]["name"],
+            sd.query_hostapis(devices[chosen]["hostapi"])["name"], alts,
+        )
     return matches[0]
 
 
 def play_mp3_sounddevice(path: Path, device: int) -> None:
     """Decode the MP3 to PCM (miniaudio) and play it on a specific output
-    device via sounddevice. Blocks until playback finishes."""
+    device via sounddevice. Blocks until playback finishes.
+
+    WASAPI shared mode requires audio at the endpoint's configured rate (often
+    48 kHz for Bluetooth/USB) and rejects edge-tts MP3s (24 kHz) with
+    "Invalid sample rate". Pass WasapiSettings(auto_convert=True) so Windows
+    resamples for us. Other host APIs (DirectSound, MME) resample at the
+    system mixer and accept any rate.
+    """
     import miniaudio
     import numpy as np
     import sounddevice as sd
@@ -159,7 +192,13 @@ def play_mp3_sounddevice(path: Path, device: int) -> None:
     samples = np.frombuffer(bytes(decoded.samples), dtype=np.int16)
     if decoded.nchannels > 1:
         samples = samples.reshape(-1, decoded.nchannels)
-    sd.play(samples, decoded.sample_rate, device=device)
+
+    extra_settings = None
+    host_api_name = sd.query_hostapis(sd.query_devices(device)["hostapi"])["name"].lower()
+    if "wasapi" in host_api_name:
+        extra_settings = sd.WasapiSettings(auto_convert=True)
+
+    sd.play(samples, decoded.sample_rate, device=device, extra_settings=extra_settings)
     sd.wait()
 
 

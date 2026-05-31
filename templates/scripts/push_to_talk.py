@@ -154,6 +154,21 @@ def format_device_list() -> str:
     return "\n".join(lines)
 
 
+# When a device name matches multiple endpoints (the same hardware is exposed
+# once per Windows host API), prefer modern reliable APIs. PortAudio's MME
+# wrapper truncates names to 31 chars and can silently route Bluetooth audio
+# to nowhere; WASAPI is the modern endpoint and works for BT/USB/HDMI alike.
+_HOST_API_PREFERENCE = ("wasapi", "directsound", "mme", "wdmks")
+
+
+def _host_api_rank(name: str) -> int:
+    n = name.lower().replace("-", "").replace(" ", "")
+    for i, key in enumerate(_HOST_API_PREFERENCE):
+        if key in n:
+            return i
+    return len(_HOST_API_PREFERENCE)
+
+
 def resolve_audio_device(spec: str | None, want_input: bool) -> int | None:
     """Resolve a device spec to a sounddevice device index.
 
@@ -164,8 +179,9 @@ def resolve_audio_device(spec: str | None, want_input: bool) -> int | None:
     Returns None when `spec` is empty (caller should use the system default).
     Raises ValueError when an index is invalid or a name matches nothing.
     When a name matches several devices (the same hardware is usually exposed
-    once per host API — MME, DirectSound, WASAPI, …) the lowest index is used
-    and the alternatives are logged.
+    once per host API — MME, DirectSound, WASAPI, …) the most reliable host
+    API wins (WASAPI > DirectSound > MME > WDM-KS), and the alternatives are
+    logged.
     """
     if not spec:
         return None
@@ -190,8 +206,20 @@ def resolve_audio_device(spec: str | None, want_input: bool) -> int | None:
     if not matches:
         raise ValueError(f"no {kind} device name contains {spec!r} (try --list-devices)")
     if len(matches) > 1:
-        alts = ", ".join(f"[{i}] {devices[i]['name']}" for i in matches)
-        logging.info("%s device %r matched several; using lowest index. Candidates: %s", kind, spec, alts)
+        matches.sort(key=lambda i: (
+            _host_api_rank(sd.query_hostapis(devices[i]["hostapi"])["name"]),
+            i,
+        ))
+        alts = ", ".join(
+            f"[{i}] {devices[i]['name']} ({sd.query_hostapis(devices[i]['hostapi'])['name']})"
+            for i in matches
+        )
+        chosen = matches[0]
+        logging.info(
+            "%s device %r matched several; picked [%d] %s (%s). Candidates: %s",
+            kind, spec, chosen, devices[chosen]["name"],
+            sd.query_hostapis(devices[chosen]["hostapi"])["name"], alts,
+        )
     return matches[0]
 
 
@@ -239,9 +267,20 @@ def record_until_release(hotkeys: dict, input_device: int | None = None) -> tupl
             stop_signal.set()
             return False  # stop the listener
 
+    # WASAPI shared-mode rejects rates that differ from the endpoint's
+    # configured rate (most USB/BT mics expose 44.1 or 48 kHz, not 16 kHz that
+    # whisper.cpp wants). Ask Windows to resample for us. Other host APIs
+    # (DirectSound, MME) resample at the system mixer and accept any rate.
+    extra_settings = None
+    if input_device is not None:
+        host_api_name = sd.query_hostapis(sd.query_devices(input_device)["hostapi"])["name"].lower()
+        if "wasapi" in host_api_name:
+            extra_settings = sd.WasapiSettings(auto_convert=True)
+
     with sd.InputStream(
         samplerate=SAMPLE_RATE, channels=1, dtype="int16",
         device=input_device, callback=audio_cb,
+        extra_settings=extra_settings,
     ):
         listener = keyboard.Listener(on_press=on_press, on_release=on_release)
         listener.start()

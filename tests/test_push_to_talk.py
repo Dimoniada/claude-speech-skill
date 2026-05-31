@@ -1,10 +1,10 @@
 """Unit tests for the pure logic in templates/scripts/push_to_talk.py.
 
-Covers whisper JSON parsing. The language is now chosen by which hotkey is
-held (no detection), so there is no resolution rule left to unit-test; the
-push-to-talk dispatch is exercised manually. parse_whisper_json still has no
-I/O or hardware dependencies, so it runs anywhere the voice-in Python deps
-are importable.
+Covers whisper JSON parsing and the audio-device host-API ranking that
+disambiguates the same physical device exposed once per Windows host API
+(MME, DirectSound, WASAPI, WDM-KS). The push-to-talk language dispatch is
+chosen by which hotkey is held (no detection), so there is no resolution
+rule left to unit-test there; it is exercised manually.
 
 Run:
     py -m pytest tests/test_push_to_talk.py
@@ -51,6 +51,129 @@ def test_parse_missing_result_returns_empty_lang():
 def test_parse_garbage_returns_empties():
     assert ptt.parse_whisper_json("not json") == ("", "")
     assert ptt.parse_whisper_json("") == ("", "")
+
+
+# --- _host_api_rank --------------------------------------------------------
+
+def test_host_api_rank_orders_modern_first():
+    # WASAPI is the modern Windows audio endpoint and the only one that works
+    # reliably for Bluetooth output; WDM-KS is exclusive-mode and the most
+    # likely to refuse to open. Anything unknown lands at the bottom.
+    assert ptt._host_api_rank("Windows WASAPI") < ptt._host_api_rank("Windows DirectSound")
+    assert ptt._host_api_rank("Windows DirectSound") < ptt._host_api_rank("MME")
+    assert ptt._host_api_rank("MME") < ptt._host_api_rank("Windows WDM-KS")
+    assert ptt._host_api_rank("Windows WDM-KS") < ptt._host_api_rank("ASIO")
+
+
+def test_host_api_rank_ignores_spaces_and_hyphens():
+    # PortAudio reports "Windows WDM-KS" with a hyphen, but the rank table
+    # uses the bare key "wdmks" — both forms must compare equal.
+    assert ptt._host_api_rank("Windows WDM-KS") == ptt._host_api_rank("wdmks")
+    assert ptt._host_api_rank("WindowsWASAPI") == ptt._host_api_rank("Windows WASAPI")
+
+
+# --- resolve_audio_device host-API ranking ---------------------------------
+
+class _FakeSd:
+    """Drop-in for sounddevice that returns canned device + hostapi tables.
+
+    The real sounddevice import touches PortAudio and probes hardware on
+    import; we swap it in via ``ptt.sd = _FakeSd(...)`` for the duration of
+    a single test so the ranking logic can be exercised without a sound card.
+    """
+
+    def __init__(self, devices, hostapis):
+        self._devices = devices
+        self._hostapis = hostapis
+
+    def query_devices(self, idx=None):
+        return self._devices if idx is None else self._devices[idx]
+
+    def query_hostapis(self, idx):
+        return self._hostapis[idx]
+
+
+def _usb_mic_quadruple():
+    """The bug scenario: one USB mic exposed once per host API.
+
+    Indices and host APIs mirror what PortAudio prints on a real Windows box:
+    MME is the lowest index (and its name is truncated to 31 chars), WASAPI
+    sits higher up at index 9. The old "lowest index wins" rule picked MME
+    and silently dropped capture; the fix must pick WASAPI (index 9).
+    """
+    base = {"max_input_channels": 1, "max_output_channels": 0}
+    devices = [
+        # 0..0: filler so MME isn't at index 0 (matches real layout)
+        {"name": "Sound Mapper", "max_input_channels": 2, "max_output_channels": 0, "hostapi": 0},
+        # 1: MME — name truncated to 31 chars by PortAudio
+        {**base, "name": "Microphone (USB PnP Audio Devic", "hostapi": 0},
+        # 2..4: filler outputs so "USB PnP" only matches the four mic rows
+        {"name": "Speakers", "max_input_channels": 0, "max_output_channels": 2, "hostapi": 0},
+        {"name": "Speakers", "max_input_channels": 0, "max_output_channels": 2, "hostapi": 1},
+        {"name": "Speakers", "max_input_channels": 0, "max_output_channels": 2, "hostapi": 2},
+        # 5: DirectSound
+        {**base, "name": "Microphone (USB PnP Audio Device)", "hostapi": 1},
+        {"name": "Speakers", "max_input_channels": 0, "max_output_channels": 2, "hostapi": 1},
+        {"name": "Speakers", "max_input_channels": 0, "max_output_channels": 2, "hostapi": 2},
+        {"name": "Speakers", "max_input_channels": 0, "max_output_channels": 2, "hostapi": 2},
+        # 9: WASAPI — the one we want
+        {**base, "name": "Microphone (USB PnP Audio Device)", "hostapi": 2},
+        # 10..16: filler
+        *[{"name": f"slot {i}", "max_input_channels": 0, "max_output_channels": 2, "hostapi": 3}
+          for i in range(10, 17)],
+        # 17: WDM-KS
+        {**base, "name": "Microphone (USB PnP Audio Device)", "hostapi": 3},
+    ]
+    hostapis = [
+        {"name": "MME"},
+        {"name": "Windows DirectSound"},
+        {"name": "Windows WASAPI"},
+        {"name": "Windows WDM-KS"},
+    ]
+    return devices, hostapis
+
+
+def _with_fake_sd(fake, fn):
+    """Run ``fn`` with ``ptt.sd`` swapped for ``fake`` and restored after.
+
+    Plain try/finally instead of pytest's monkeypatch so the file still runs
+    under the bare ``py tests/test_push_to_talk.py`` path used by _run_all.
+    """
+    original = ptt.sd
+    ptt.sd = fake
+    try:
+        return fn()
+    finally:
+        ptt.sd = original
+
+
+def test_resolve_audio_device_prefers_wasapi_over_lower_index_mme():
+    # This is the regression: "USB PnP" matches indices 1 (MME), 5 (DS),
+    # 9 (WASAPI), 17 (WDM-KS). Old behaviour returned 1 and BT mic capture
+    # silently failed. Correct behaviour returns 9.
+    devices, hostapis = _usb_mic_quadruple()
+    fake = _FakeSd(devices, hostapis)
+    chosen = _with_fake_sd(fake, lambda: ptt.resolve_audio_device("USB PnP", want_input=True))
+    assert chosen == 9, f"expected WASAPI mic at 9, got {chosen}"
+
+
+def test_resolve_audio_device_ranking_works_for_output_too():
+    # Same fake table, but query as output. The "Speakers" name matches
+    # outputs at 2 (MME), 3+6 (DS), 4+7+8 (WASAPI). WASAPI wins; among the
+    # three WASAPI matches the lowest index (4) breaks the tie.
+    devices, hostapis = _usb_mic_quadruple()
+    fake = _FakeSd(devices, hostapis)
+    chosen = _with_fake_sd(fake, lambda: ptt.resolve_audio_device("Speakers", want_input=False))
+    assert chosen == 4, f"expected WASAPI speaker at 4, got {chosen}"
+
+
+def test_resolve_audio_device_numeric_spec_bypasses_ranking():
+    # A user who pins by index is asking for that exact endpoint — even if it
+    # is the MME one we'd otherwise demote. Ranking must NOT override them.
+    devices, hostapis = _usb_mic_quadruple()
+    fake = _FakeSd(devices, hostapis)
+    chosen = _with_fake_sd(fake, lambda: ptt.resolve_audio_device("1", want_input=True))
+    assert chosen == 1
 
 
 def _run_all() -> int:
