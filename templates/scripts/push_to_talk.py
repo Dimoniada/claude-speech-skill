@@ -554,7 +554,7 @@ def write_latest_transcript(text: str, wav_path: Path, lang: str) -> None:
     LATEST_TRANSCRIPT.write_text(text + "\n", encoding="utf-8")
 
 
-def find_chat_input(win) -> object | None:
+def find_chat_input(win, retries: int = 4, retry_delay: float = 0.2) -> object | None:
     """Locate the chat input control inside the Claude app window via UIA.
 
     The Claude desktop app is Electron and exposes its whole web view as a
@@ -565,6 +565,15 @@ def find_chat_input(win) -> object | None:
     buttons. We pick the single Group matching that geometric signature; if
     zero or more than one match we return None and let the caller fall back
     to plain window-level focus.
+
+    Cold-start retry: the first UIA tree walk right after the window is
+    brought to the foreground often returns before Chromium has realized the
+    web view's accessibility tree, so the input Group isn't present yet and
+    zero candidates are found. That is why the very first transcript of a
+    session used to silently miss the input box and only the second attempt
+    landed. When zero candidates are found we wait briefly and re-walk the
+    tree up to ``retries`` times. An *ambiguous* (>1) result is a different
+    problem that retrying won't fix, so we bail immediately in that case.
 
     Returns the matched pywinauto element, or ``None`` when no unambiguous
     candidate was found.
@@ -581,29 +590,40 @@ def find_chat_input(win) -> object | None:
     bottom_threshold = wr.top + int((wr.bottom - wr.top) * 0.72)
     min_width = int((wr.right - wr.left) * 0.40)
 
-    try:
-        groups = win.descendants(control_type="Group")
-    except Exception as exc:
-        logging.warning("UIA descendants(Group) failed: %s", exc)
-        return None
-
-    candidates = []
-    for g in groups:
+    for attempt in range(retries):
         try:
-            r = g.rectangle()
-            focusable = bool(g.element_info.element.CurrentIsKeyboardFocusable)
-        except Exception:
-            continue
-        if focusable and r.top >= bottom_threshold and (r.right - r.left) >= min_width:
-            candidates.append(g)
+            groups = win.descendants(control_type="Group")
+        except Exception as exc:
+            logging.warning("UIA descendants(Group) failed: %s", exc)
+            return None
 
-    if len(candidates) == 1:
-        return candidates[0]
-    if len(candidates) > 1:
-        logging.info(
-            "UIA chat-input search found %d focusable wide Groups; ambiguous, skipping",
-            len(candidates),
-        )
+        candidates = []
+        for g in groups:
+            try:
+                r = g.rectangle()
+                focusable = bool(g.element_info.element.CurrentIsKeyboardFocusable)
+            except Exception:
+                continue
+            if focusable and r.top >= bottom_threshold and (r.right - r.left) >= min_width:
+                candidates.append(g)
+
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) > 1:
+            logging.info(
+                "UIA chat-input search found %d focusable wide Groups; ambiguous, skipping",
+                len(candidates),
+            )
+            return None
+        # Zero candidates — the accessibility tree is probably still warming
+        # up. Wait and re-walk, unless this was the last attempt.
+        if attempt < retries - 1:
+            logging.info(
+                "UIA chat-input search found no candidate (attempt %d/%d); retrying",
+                attempt + 1, retries,
+            )
+            time.sleep(retry_delay)
+
     return None
 
 
