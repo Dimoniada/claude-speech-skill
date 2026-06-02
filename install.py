@@ -69,6 +69,23 @@ def render(tpl_text: str, mapping: dict[str, str]) -> str:
     return out
 
 
+def quote_interpreter_for_json(exe: str) -> str:
+    """Return a Python interpreter path as a JSON-escaped, double-quoted token.
+
+    The Stop/UserPromptSubmit hook commands live inside a JSON string in
+    settings.json, so backslashes are doubled and the surrounding quotes are
+    backslash-escaped (matching the template's \\"...\\" style). Quoting also
+    handles spaces in the path (e.g. 'C:\\Program Files\\...').
+
+    Baking the *real* interpreter (sys.executable) into the hook — instead of a
+    bare ``py`` — avoids a silent-failure mode: if ``py`` isn't on PATH when
+    Claude Code runs the hook, TTS just never plays, with no error surfaced.
+    Using the same interpreter that ran the installer also guarantees the hook
+    sees the deps install.py pip-installed (edge-tts, miniaudio, ...).
+    """
+    return '\\"' + exe.replace("\\", "\\\\") + '\\"'
+
+
 def write_file(path: Path, content: str, force: bool) -> bool:
     """Returns True if written, False if skipped (existed and not force)."""
     if path.exists() and not force:
@@ -289,6 +306,9 @@ def main(argv: list[str]) -> int:
         "COMMON_ISO": common_entry["iso"],
         "OUTPUT_DEVICE_ARG": output_device_arg,
         "TARGET": str(project_dir).replace("\\", "\\\\"),  # JSON-safe path
+        # Bake the real interpreter into the hook commands rather than a bare
+        # `py` (which fails silently if not on PATH when the hook runs).
+        "PY": quote_interpreter_for_json(sys.executable),
     }
 
     print(
@@ -352,6 +372,12 @@ def main(argv: list[str]) -> int:
     print(
         f"\nDone. Open '{project_dir}' in Claude Code and say hi — the assistant will greet you in "
         f"{entry['name']} and write its notes in {common_entry['name']}."
+    )
+    print(
+        "\nIMPORTANT: Claude Code loads hooks at session start. If you ran this from\n"
+        "inside the session you'll be chatting in, RESTART Claude Code (or reload\n"
+        "config) and APPROVE the new Stop hook when prompted — otherwise spoken\n"
+        "output stays silent because the hook was never loaded."
     )
     if not args.no_voice_in:
         if args.gpu:
