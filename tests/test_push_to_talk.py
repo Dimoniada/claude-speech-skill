@@ -176,6 +176,41 @@ def test_resolve_audio_device_numeric_spec_bypasses_ranking():
     assert chosen == 1
 
 
+# --- resolve_hotkey --------------------------------------------------------
+
+def test_resolve_hotkey_function_key():
+    # The F9/F10 defaults and any fN remap must map to the pynput Key constant.
+    assert ptt.resolve_hotkey("f9") == ptt.keyboard.Key.f9
+    assert ptt.resolve_hotkey("f10") == ptt.keyboard.Key.f10
+
+
+def test_resolve_hotkey_named_key():
+    assert ptt.resolve_hotkey("space") == ptt.keyboard.Key.space
+
+
+def test_resolve_hotkey_is_case_insensitive():
+    # The setup interview may hand us "F7"; resolve_hotkey lowercases first.
+    assert ptt.resolve_hotkey("F7") == ptt.keyboard.Key.f7
+
+
+def test_resolve_hotkey_single_char():
+    # A letter remap becomes a KeyCode carrying that character.
+    key = ptt.resolve_hotkey("a")
+    assert isinstance(key, ptt.keyboard.KeyCode)
+    assert key.char == "a"
+
+
+def test_resolve_hotkey_unknown_raises():
+    # An unrecognised multi-char name is rejected, so a bad remap fails loudly
+    # at launch rather than silently listening for a key that never fires.
+    try:
+        ptt.resolve_hotkey("notakey")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError for unknown hotkey")
+
+
 def _run_all() -> int:
     funcs = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failures = 0
