@@ -390,7 +390,7 @@ py D:\Tools\claude-speech\install.py --target Dutch --common Russian --project-d
 Invoke the skill and tell Claude:
 > "Set up a Dutch tutor here."
 
-Claude will resolve the project directory from `$CLAUDE_PROJECT_DIR` (Claude Code sets this automatically per session), confirm with you, and run the installer.
+Claude will resolve the project directory from `$CLAUDE_PROJECT_DIR` (Claude Code sets this automatically per session), confirm with you, and run the installer. As part of setup it asks you to pick a microphone and speaker, choose the CPU or GPU Whisper backend, and — optionally — **remap the push-to-talk hotkeys** (it defaults to **F9** for the target language and **F10** for the common language; press Enter to keep them, or name two other keys). The chosen keys are baked into the daemon launch, so you don't have to pass `--target-hotkey` / `--common-hotkey` yourself.
 
 ### Manually
 
