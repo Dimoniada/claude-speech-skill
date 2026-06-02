@@ -419,19 +419,41 @@ If you want push-to-talk too, follow the "Voice input — binary dependencies" s
 
 ## Adding a new language
 
-Edit `voices.json`. Find a voice id from the full edge-tts catalogue:
+The 11 languages in `voices.json` are just curated defaults, **not a hard limit**. All three engines the skill relies on cover far more, so practically any mainstream language works:
+
+- **edge-tts** (the spoken voice) — 100+ neural voices.
+- **Whisper** (speech-to-text for push-to-talk) — ~99 languages.
+- **espeak-ng** (the IPA pronunciation line) — 100+ languages.
+
+To add one, edit `voices.json`. First find a voice id from the full edge-tts catalogue (search by the language's BCP-47 prefix):
 
 ```powershell
-edge-tts --list-voices | findstr nl-
+edge-tts --list-voices | findstr nb-
 ```
 
-Add an entry:
+Add an entry with `name`, `code` (the ISO 639-1 tag used in `<code>...</code>`), `iso` (the edge-tts locale), and `voice`:
 
 ```json
 {"name": "Norwegian", "code": "no", "iso": "nb-NO", "voice": "nb-NO-PernilleNeural"}
 ```
 
 Re-run the installer with `--target Norwegian --common <your-language>`.
+
+### When the espeak-ng voice differs from the ISO 639-1 code
+
+For push-to-talk, the daemon derives the espeak-ng voice for the IPA line from the `--target` code. That mapping is direct for most languages (`de` → `de`, `fr` → `fr`), with a few built-in special cases (`en` → `en-us`, `zh` → `cmn`). But espeak-ng's voice names don't always match the ISO 639-1 code — for example **Norwegian Bokmål** is `nb` in espeak-ng, not `no`. When they differ, pass `--espeak-voice` explicitly when starting the daemon so the IPA renders correctly:
+
+```powershell
+py scripts\push_to_talk.py --target no --common en --espeak-voice nb
+```
+
+To see what espeak-ng supports and the exact voice names, run:
+
+```powershell
+.\tools\espeak-ng\espeak-ng.exe --voices
+```
+
+This only affects the IPA line for the language you're learning; the spoken TTS (edge-tts) and the transcription (Whisper) are unaffected. If you skip `--espeak-voice` and the codes happen to differ, you'll still get transcribed text — just no (or wrong) IPA — which is a cosmetic issue, not a hard failure.
 
 ## Troubleshooting
 
