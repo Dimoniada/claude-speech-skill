@@ -246,6 +246,94 @@ def test_find_free_port_none_when_range_exhausted():
         assert ptt.find_free_port("127.0.0.1", taken, attempts=1) is None
 
 
+# --- find_chat_input cold-start retry --------------------------------------
+
+class _FakeRect:
+    def __init__(self, left, top, right, bottom):
+        self.left, self.top, self.right, self.bottom = left, top, right, bottom
+
+
+class _FakeElementInfo:
+    def __init__(self, focusable):
+        # Mirror pywinauto's g.element_info.element.CurrentIsKeyboardFocusable
+        self.element = type("E", (), {"CurrentIsKeyboardFocusable": focusable})()
+
+
+class _FakeGroup:
+    def __init__(self, rect, focusable):
+        self._rect = rect
+        self.element_info = _FakeElementInfo(focusable)
+
+    def rectangle(self):
+        return self._rect
+
+
+class _FakeWin:
+    """A Claude-app window whose UIA tree only yields the input Group after a
+    few walks — modelling Chromium's accessibility tree not being realized on
+    the first descendants() walk right after the window is foregrounded.
+    """
+
+    def __init__(self, groups_per_call):
+        # groups_per_call: list of group-lists, one per descendants() call;
+        # the last entry is reused for any calls beyond its length.
+        self._groups_per_call = groups_per_call
+        self.calls = 0
+
+    def rectangle(self):
+        return _FakeRect(0, 0, 1000, 1000)  # 1000x1000 window at origin
+
+    def descendants(self, control_type=None):  # noqa: ANN001
+        idx = min(self.calls, len(self._groups_per_call) - 1)
+        self.calls += 1
+        return self._groups_per_call[idx]
+
+
+def _valid_input_group():
+    # Wide (>=400px), low (top >= 720), focusable -> matches the input filter.
+    return _FakeGroup(_FakeRect(50, 800, 950, 900), focusable=True)
+
+
+def _narrow_button_group():
+    # A toolbar button: focusable and low, but too narrow to match.
+    return _FakeGroup(_FakeRect(50, 800, 120, 900), focusable=True)
+
+
+def test_find_chat_input_retries_until_tree_warms_up():
+    # Empty on the first two walks (cold Chromium tree), input appears on the
+    # third -- find_chat_input must keep re-walking and return it instead of
+    # giving up after the first cold walk (the "only works the 2nd time" bug).
+    win = _FakeWin([[], [], [_valid_input_group()]])
+    found = ptt.find_chat_input(win, retries=4, retry_delay=0)
+    assert found is not None
+    assert win.calls == 3
+
+
+def test_find_chat_input_returns_none_when_never_appears():
+    # If the input never shows up within `retries`, return None so the caller
+    # falls back to window-level focus rather than looping forever.
+    win = _FakeWin([[]])
+    assert ptt.find_chat_input(win, retries=3, retry_delay=0) is None
+    assert win.calls == 3
+
+
+def test_find_chat_input_does_not_retry_when_ambiguous():
+    # Two wide focusable Groups is a different problem (ambiguous), not a cold
+    # tree -- retrying can't help, so bail on the first walk.
+    win = _FakeWin([[_valid_input_group(), _valid_input_group()]])
+    assert ptt.find_chat_input(win, retries=4, retry_delay=0) is None
+    assert win.calls == 1
+
+
+def test_find_chat_input_first_call_hit_skips_retry():
+    # When the input is present on the very first walk (warm app), return it
+    # immediately without spending any retries.
+    win = _FakeWin([[_narrow_button_group(), _valid_input_group()]])
+    found = ptt.find_chat_input(win, retries=4, retry_delay=0)
+    assert found is not None
+    assert win.calls == 1
+
+
 def _run_all() -> int:
     funcs = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failures = 0
