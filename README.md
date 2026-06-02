@@ -392,6 +392,13 @@ Invoke the skill and tell Claude:
 
 Claude will resolve the project directory from `$CLAUDE_PROJECT_DIR` (Claude Code sets this automatically per session), confirm with you, and run the installer. As part of setup it asks you to pick a microphone and speaker, choose the CPU or GPU Whisper backend, and — optionally — **remap the push-to-talk hotkeys** (it defaults to **F9** for the target language and **F10** for the common language; press Enter to keep them, or name two other keys). The chosen keys are baked into the daemon launch, so you don't have to pass `--target-hotkey` / `--common-hotkey` yourself.
 
+#### Two things setup does *not* ask — set them manually if needed
+
+To keep the interview short, a couple of knobs are left at sensible defaults and only changed via daemon flags:
+
+- **Which Claude window to paste into** (`--window-title-re`). The daemon auto-pastes your transcript into the first window matching `.*Claude.*`. If you run more than one Claude-titled window (e.g. the Claude Desktop client alongside your Claude Code terminal), it may target the wrong one. Pin it with a more specific regex — see [Auto-submit pastes into the wrong window](#troubleshooting) under Troubleshooting. (Run once with `--list-windows` to see the candidates.)
+- **Whisper model size** (`--model`). Setup provisions the multilingual quantized **medium** model (~540 MB) — the accuracy/speed sweet spot. You can point the daemon at a smaller one (`ggml-small-q5_1.bin` ~180 MB, or `ggml-base.bin` ~150 MB) for faster transcription and lower RAM/VRAM at some cost to accuracy — see the "Whisper model" download step under "Voice input — binary dependencies" for the links and the `--model` flag.
+
 ### Manually
 
 `--target` is the target **language**; the scaffold destination is `--project-dir` (`--lang` is still accepted as a hidden alias for `--target`).
