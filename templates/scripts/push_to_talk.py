@@ -328,6 +328,29 @@ def parse_whisper_json(json_text: str) -> tuple[str, str]:
 # is what made the old per-call whisper-cli path slow (~3.5 s vs <1 s here).
 # ---------------------------------------------------------------------------
 
+def find_free_port(host: str, preferred: int, attempts: int = 20) -> int | None:
+    """Return the first bindable TCP port at or after `preferred` on `host`.
+
+    The resident whisper-server hard-fails if its port is already taken — by
+    another app, or by another project's claude-speech server sharing the
+    default 8910. Rather than exiting with an error and making the user pass
+    --server-port by hand, probe upward from the requested port and use the
+    first free one. Returns None if none of `attempts` ports are free.
+
+    Note: we deliberately do NOT set SO_REUSEADDR. On Windows it lets a bind
+    succeed on a port that's already in use, which would defeat the probe;
+    a plain bind that raises OSError is the reliable "port is taken" signal.
+    """
+    for port in range(preferred, preferred + attempts):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            try:
+                probe.bind((host, port))
+                return port
+            except OSError:
+                continue
+    return None
+
+
 def start_whisper_server(
     server_bin: Path, model: Path, host: str, port: int
 ) -> subprocess.Popen | None:
@@ -912,14 +935,23 @@ def main(argv: list[str]) -> int:
     # so a failure to start is fatal (with an actionable message) rather than a
     # silent fallback.
     kill_stale_whisper_servers(args.whisper_server)
+    # Pick a usable port: probe upward from the requested one and fall back to
+    # the next free port if it's taken, instead of erroring out. If the probe
+    # finds nothing free, keep the requested port so start-up fails loudly with
+    # the actionable message below rather than silently.
+    server_port = find_free_port(args.server_host, args.server_port) or args.server_port
+    if server_port != args.server_port:
+        logging.info("requested whisper-server port %d busy; using free port %d",
+                     args.server_port, server_port)
+        print(f"  note: port {args.server_port} is busy — using {server_port} instead.", flush=True)
     server_proc = start_whisper_server(
-        args.whisper_server, args.model, args.server_host, args.server_port
+        args.whisper_server, args.model, args.server_host, server_port
     )
-    if server_proc is None or not wait_for_server(args.server_host, args.server_port):
-        logging.error("whisper-server failed to start on %s:%s", args.server_host, args.server_port)
+    if server_proc is None or not wait_for_server(args.server_host, server_port):
+        logging.error("whisper-server failed to start on %s:%s", args.server_host, server_port)
         stop_whisper_server(server_proc)
         print(
-            f"ERROR: whisper-server failed to start at {args.server_host}:{args.server_port}.\n"
+            f"ERROR: whisper-server failed to start at {args.server_host}:{server_port}.\n"
             f"       See {SERVER_LOG_PATH} for details. Common causes: the port is\n"
             f"       already in use (try --server-port <other>) or the binary/model is\n"
             f"       missing. Provision binaries with `--gpu auto` (see README).",
@@ -929,7 +961,7 @@ def main(argv: list[str]) -> int:
         return 2
     print(
         f"  transcription: whisper-server (resident, warm) "
-        f"at {args.server_host}:{args.server_port}.",
+        f"at {args.server_host}:{server_port}.",
         flush=True,
     )
     print("=" * 60, flush=True)
@@ -949,7 +981,7 @@ def main(argv: list[str]) -> int:
             is_target = (lang == target)
             print(f"  captured {duration:.1f}s, transcribing forced '{lang}'...", flush=True)
 
-            text = transcribe_via_server(capture_path, lang, args.server_host, args.server_port)
+            text = transcribe_via_server(capture_path, lang, args.server_host, server_port)
             if not text:
                 print("  [empty transcript — transcription error, see log]\n", flush=True)
                 continue

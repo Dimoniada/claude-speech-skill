@@ -13,6 +13,7 @@ Run:
 """
 from __future__ import annotations
 
+import socket
 import sys
 from pathlib import Path
 
@@ -209,6 +210,40 @@ def test_resolve_hotkey_unknown_raises():
         pass
     else:
         raise AssertionError("expected ValueError for unknown hotkey")
+
+
+# --- find_free_port --------------------------------------------------------
+
+def test_find_free_port_returns_preferred_when_free():
+    # Grab an OS-assigned port, release it, then confirm find_free_port hands
+    # that same (now-free) port straight back without moving on.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        free = s.getsockname()[1]
+    assert ptt.find_free_port("127.0.0.1", free) == free
+
+
+def test_find_free_port_skips_occupied():
+    # Hold a port open, then ask find_free_port to start there — it must skip
+    # the busy one and return a higher, free port instead of failing.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as occupied:
+        occupied.bind(("127.0.0.1", 0))
+        occupied.listen()
+        taken = occupied.getsockname()[1]
+        chosen = ptt.find_free_port("127.0.0.1", taken, attempts=10)
+        assert chosen is not None
+        assert chosen != taken
+        assert chosen > taken
+
+
+def test_find_free_port_none_when_range_exhausted():
+    # attempts=1 with the only candidate occupied -> None, so the caller can
+    # fall back to the requested port and fail loudly rather than hang.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as occupied:
+        occupied.bind(("127.0.0.1", 0))
+        occupied.listen()
+        taken = occupied.getsockname()[1]
+        assert ptt.find_free_port("127.0.0.1", taken, attempts=1) is None
 
 
 def _run_all() -> int:
