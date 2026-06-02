@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "py \"$CLAUDE_PROJECT_DIR\\scripts\\speak_lang.py\" --voice {{VOICE}} --tag {{LANG_CODE}}{{OUTPUT_DEVICE_ARG}}"
+            "command": "{{PY}} \"$CLAUDE_PROJECT_DIR\\scripts\\speak_lang.py\" --voice {{VOICE}} --tag {{LANG_CODE}}{{OUTPUT_DEVICE_ARG}}"
           }
         ]
       }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "py \"$CLAUDE_PROJECT_DIR\\scripts\\inject_transcript.py\""
+            "command": "{{PY}} \"$CLAUDE_PROJECT_DIR\\scripts\\inject_transcript.py\""
           }
         ]
       }
