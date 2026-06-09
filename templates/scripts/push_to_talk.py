@@ -86,6 +86,12 @@ PROJECT_ROOT = SCRIPT_DIR.parent
 RECORDINGS_DIR = PROJECT_ROOT / "recordings"
 LOG_PATH = PROJECT_ROOT / "logs" / "push_to_talk.log"
 LATEST_TRANSCRIPT = RECORDINGS_DIR / "latest_transcript.txt"
+# Single source of truth install.py writes alongside CLAUDE.md. When the daemon
+# is launched without explicit --target/--common/--input-device/hotkeys it falls
+# back to this file, so it never has to be told (or guessed at) which languages
+# the project uses — they always match the teacher persona.
+CONFIG_PATH = PROJECT_ROOT / ".claude" / "claude_speech.json"
+CLAUDE_MD_PATH = PROJECT_ROOT / "CLAUDE.md"
 
 SAMPLE_RATE = 16000  # whisper.cpp expects 16 kHz mono
 WHISPER_DIR = PROJECT_ROOT / "tools" / "whisper.cpp"
@@ -115,6 +121,56 @@ LANG_TO_ESPEAK_VOICE: dict[str, str] = {
     "en": "en-us",
     "zh": "cmn",
 }
+
+
+def load_project_config(path: Path = CONFIG_PATH) -> dict:
+    """Read .claude/claude_speech.json — the source of truth install.py writes
+    next to CLAUDE.md. A missing or unreadable file yields {}, so the daemon
+    simply falls back to CLI args and built-in defaults (the pre-config
+    behaviour) instead of failing."""
+    try:
+        with path.open(encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except (OSError, json.JSONDecodeError) as exc:
+        logging.warning("could not read project config %s: %s", path, exc)
+        return {}
+
+
+def parse_persona_marker(text: str) -> dict:
+    """Extract the machine-readable marker install.py embeds in CLAUDE.md:
+        <!-- claude-speech: target=nl common=en voice=... -->
+    Returns {} when no marker is present (a hand-written or pre-marker CLAUDE.md),
+    so the consistency check below stays silent rather than crying wolf."""
+    m = re.search(r"<!--\s*claude-speech:\s*(.*?)\s*-->", text)
+    if not m:
+        return {}
+    fields: dict[str, str] = {}
+    for token in m.group(1).split():
+        key, sep, value = token.partition("=")
+        if sep:
+            fields[key] = value
+    return fields
+
+
+def persona_mismatch_warnings(target: str, common: str, marker: dict) -> list[str]:
+    """Compare the languages the daemon is about to use against what the teacher
+    persona (CLAUDE.md marker) declares. Divergence means persona and voice-in
+    have drifted — the exact failure the config coupling exists to prevent — so
+    we surface it loudly. Returns the warning lines (empty when consistent, or
+    when the marker is absent and thus unverifiable)."""
+    warnings: list[str] = []
+    if marker.get("target") and marker["target"] != target:
+        warnings.append(
+            f"CLAUDE.md persona target={marker['target']} but daemon target={target}"
+        )
+    if marker.get("common") and marker["common"] != common:
+        warnings.append(
+            f"CLAUDE.md persona common={marker['common']} but daemon common={common}"
+        )
+    return warnings
 
 
 def setup_logging() -> None:
@@ -786,8 +842,8 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--target", help="ISO 639-1 code of the language being learned (spoken + IPA), e.g. nl, en, de")
     parser.add_argument("--common", help="ISO 639-1 code of your communication language (notes, never spoken), e.g. ru")
     parser.add_argument("--lang", help=argparse.SUPPRESS)  # back-compat alias for --target
-    parser.add_argument("--target-hotkey", default=DEFAULT_TARGET_HOTKEY, help="hold to speak the TARGET language, forced transcription + IPA (default: f9)")
-    parser.add_argument("--common-hotkey", default=DEFAULT_COMMON_HOTKEY, help="hold to speak the COMMON language, forced transcription, no IPA (default: f10)")
+    parser.add_argument("--target-hotkey", default=None, help="hold to speak the TARGET language, forced transcription + IPA (default: f9, or from .claude/claude_speech.json)")
+    parser.add_argument("--common-hotkey", default=None, help="hold to speak the COMMON language, forced transcription, no IPA (default: f10, or from .claude/claude_speech.json)")
     parser.add_argument("--hotkey", help=argparse.SUPPRESS)  # back-compat alias for --target-hotkey
     parser.add_argument("--model", type=Path, default=DEFAULT_MODEL, help="path to ggml whisper model")
     parser.add_argument("--whisper-server", type=Path, default=DEFAULT_WHISPER_SERVER, help="path to whisper-server.exe (resident transcription backend)")
@@ -846,17 +902,32 @@ def main(argv: list[str]) -> int:
 
     setup_logging()
 
-    target = (args.target or args.lang or "").strip().lower()
-    common = (args.common or "").strip().lower()
+    # Fall back to the project's source-of-truth config for anything not passed
+    # explicitly. This is what stops the daemon from being launched with a
+    # guessed-at language that disagrees with the teacher persona.
+    config = load_project_config()
+
+    target = (args.target or args.lang or config.get("target_code") or "").strip().lower()
+    common = (args.common or config.get("common_code") or "").strip().lower()
     if not target:
-        logging.error("no target language given; pass --target <code> (e.g. nl)")
+        logging.error("no target language given; pass --target <code> (e.g. nl) or run install.py to write %s", CONFIG_PATH.name)
         return 2
     if not common:
-        logging.error("no common language given; pass --common <code> (e.g. ru)")
+        logging.error("no common language given; pass --common <code> (e.g. ru) or run install.py to write %s", CONFIG_PATH.name)
         return 2
     if target == common:
         logging.error("--target and --common must differ (both were %r)", target)
         return 2
+
+    # Guard against persona/voice-in drift: if CLAUDE.md declares different
+    # languages than the daemon resolved, say so loudly (non-fatal).
+    try:
+        marker = parse_persona_marker(CLAUDE_MD_PATH.read_text(encoding="utf-8"))
+    except OSError:
+        marker = {}
+    for warning in persona_mismatch_warnings(target, common, marker):
+        logging.warning(warning)
+        print(f"WARNING: {warning}\n         Re-run /claude-speech <target> <common> so the persona and voice-in match.", flush=True)
 
     if not args.whisper_server.is_file():
         logging.error("whisper-server not found: %s", args.whisper_server)
@@ -874,8 +945,8 @@ def main(argv: list[str]) -> int:
     espeak_voice = args.espeak_voice or LANG_TO_ESPEAK_VOICE.get(target, target)
 
     try:
-        target_key = resolve_hotkey(args.hotkey or args.target_hotkey)
-        common_key = resolve_hotkey(args.common_hotkey)
+        target_key = resolve_hotkey(args.hotkey or args.target_hotkey or config.get("target_hotkey") or DEFAULT_TARGET_HOTKEY)
+        common_key = resolve_hotkey(args.common_hotkey or config.get("common_hotkey") or DEFAULT_COMMON_HOTKEY)
     except ValueError as exc:
         logging.error(str(exc))
         return 2
@@ -883,8 +954,9 @@ def main(argv: list[str]) -> int:
         logging.error("target and common hotkeys must differ (both resolve to %s)", format_hotkey_name(target_key))
         return 2
 
+    input_device_spec = args.input_device if args.input_device is not None else config.get("input_device")
     try:
-        input_device = resolve_audio_device(args.input_device, want_input=True)
+        input_device = resolve_audio_device(input_device_spec, want_input=True)
     except ValueError as exc:
         logging.error("input device: %s", exc)
         return 2

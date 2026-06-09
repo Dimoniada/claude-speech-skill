@@ -37,6 +37,19 @@ HERE = Path(__file__).resolve().parent
 VOICES_PATH = HERE / "voices.json"
 TPL_DIR = HERE / "templates"
 
+# Single source of truth for a project's language setup. Written alongside
+# CLAUDE.md (from the same install run, so the two can't disagree) and read back
+# by push_to_talk.py when it is launched without explicit --target/--common/
+# --input-device/hotkeys. That coupling is what keeps the teacher persona and the
+# voice-in daemon from drifting apart (e.g. persona says English, mic transcribes
+# Russian). Lives under .claude/ next to settings.json.
+CONFIG_NAME = "claude_speech.json"
+
+# Daemon hotkey defaults, mirrored here so the config records concrete keys even
+# when the user kept the defaults. Must match push_to_talk.py's DEFAULT_*_HOTKEY.
+DEFAULT_TARGET_HOTKEY = "f9"
+DEFAULT_COMMON_HOTKEY = "f10"
+
 
 def load_voices() -> list[dict]:
     with VOICES_PATH.open(encoding="utf-8") as f:
@@ -84,6 +97,38 @@ def quote_interpreter_for_json(exe: str) -> str:
     sees the deps install.py pip-installed (edge-tts, miniaudio, ...).
     """
     return '\\"' + exe.replace("\\", "\\\\") + '\\"'
+
+
+def build_config(
+    *, target: str, target_code: str, common: str, common_code: str, voice: str,
+    input_device: str | None, output_device: str | None,
+    target_hotkey: str, common_hotkey: str,
+) -> dict:
+    """Assemble the claude_speech.json payload — the single source of truth the
+    push-to-talk daemon reads for languages, mic, and hotkeys when it isn't told
+    them explicitly. Kept as a pure function so it can be unit-tested without
+    touching the filesystem."""
+    return {
+        "target": target,
+        "target_code": target_code,
+        "common": common,
+        "common_code": common_code,
+        "voice": voice,
+        "input_device": input_device,
+        "output_device": output_device,
+        "target_hotkey": target_hotkey,
+        "common_hotkey": common_hotkey,
+    }
+
+
+def write_config(path: Path, config: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(config, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    print(f"  wrote: {path}")
 
 
 def write_file(path: Path, content: str, force: bool) -> bool:
@@ -240,6 +285,8 @@ def main(argv: list[str]) -> int:
         "--output-device",
         help="speaker/headphone for TTS playback: device index or a name substring. Baked into the Stop hook in settings.json. List options with: py scripts/speak_lang.py --list-devices",
     )
+    parser.add_argument("--target-hotkey", help=f"push-to-talk key for the target language, recorded in {CONFIG_NAME} (default: {DEFAULT_TARGET_HOTKEY})")
+    parser.add_argument("--common-hotkey", help=f"push-to-talk key for the common language, recorded in {CONFIG_NAME} (default: {DEFAULT_COMMON_HOTKEY})")
     parser.add_argument("--project-dir", dest="project_dir", help="project directory to scaffold into (default: $CLAUDE_PROJECT_DIR or CWD)")
     parser.add_argument("--force", action="store_true", help="overwrite existing files")
     parser.add_argument("--skip-pip", action="store_true", help="don't run any pip installs (TTS or voice-in)")
@@ -319,7 +366,23 @@ def main(argv: list[str]) -> int:
 
     # CLAUDE.md
     claude_md_tpl = (TPL_DIR / "CLAUDE.md.tmpl").read_text(encoding="utf-8")
-    write_file(project_dir / "CLAUDE.md", render(claude_md_tpl, mapping), args.force)
+    wrote_claude = write_file(project_dir / "CLAUDE.md", render(claude_md_tpl, mapping), args.force)
+
+    # .claude/claude_speech.json — single source of truth for the daemon, written
+    # in lockstep with CLAUDE.md so persona and voice-in can't drift apart. Refresh
+    # it whenever CLAUDE.md is (re)written, and backfill it for pre-existing
+    # installs that predate this file (so an old project gains one on next run).
+    config_path = project_dir / ".claude" / CONFIG_NAME
+    if wrote_claude or not config_path.exists():
+        write_config(config_path, build_config(
+            target=entry["name"], target_code=entry["code"],
+            common=common_entry["name"], common_code=common_entry["code"],
+            voice=voice,
+            input_device=args.input_device,
+            output_device=args.output_device,
+            target_hotkey=args.target_hotkey or DEFAULT_TARGET_HOTKEY,
+            common_hotkey=args.common_hotkey or DEFAULT_COMMON_HOTKEY,
+        ))
 
     # .claude/settings.json
     settings_tpl = (TPL_DIR / "settings.json.tmpl").read_text(encoding="utf-8")

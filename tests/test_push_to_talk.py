@@ -13,8 +13,10 @@ Run:
 """
 from __future__ import annotations
 
+import json
 import socket
 import sys
+import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -332,6 +334,83 @@ def test_find_chat_input_first_call_hit_skips_retry():
     found = ptt.find_chat_input(win, retries=4, retry_delay=0)
     assert found is not None
     assert win.calls == 1
+
+
+# --- load_project_config ---------------------------------------------------
+
+def test_load_project_config_missing_returns_empty():
+    # No config file (e.g. an old install, or voice-in never set up) must not
+    # raise — the daemon falls back to CLI args / defaults.
+    with tempfile.TemporaryDirectory() as tmp:
+        assert ptt.load_project_config(Path(tmp) / "nope.json") == {}
+
+
+def test_load_project_config_reads_dict():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "claude_speech.json"
+        path.write_text(json.dumps({"target_code": "nl", "common_code": "en"}), encoding="utf-8")
+        cfg = ptt.load_project_config(path)
+        assert cfg["target_code"] == "nl"
+        assert cfg["common_code"] == "en"
+
+
+def test_load_project_config_bad_json_returns_empty():
+    # A truncated/corrupt file must degrade to {} (warn + fall back), not crash.
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "claude_speech.json"
+        path.write_text("{not json", encoding="utf-8")
+        assert ptt.load_project_config(path) == {}
+
+
+def test_load_project_config_non_dict_returns_empty():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "claude_speech.json"
+        path.write_text("[1, 2, 3]", encoding="utf-8")
+        assert ptt.load_project_config(path) == {}
+
+
+# --- parse_persona_marker --------------------------------------------------
+
+def test_parse_persona_marker_extracts_fields():
+    text = (
+        "<!-- claude-speech: target=nl common=en voice=nl-NL-FennaNeural -->\n"
+        "# Dutch Teacher\n"
+    )
+    marker = ptt.parse_persona_marker(text)
+    assert marker["target"] == "nl"
+    assert marker["common"] == "en"
+    assert marker["voice"] == "nl-NL-FennaNeural"
+
+
+def test_parse_persona_marker_absent_returns_empty():
+    # A hand-written or pre-marker CLAUDE.md yields {}, so the check stays quiet.
+    assert ptt.parse_persona_marker("# Dutch Teacher\nno marker here\n") == {}
+
+
+# --- persona_mismatch_warnings ---------------------------------------------
+
+def test_persona_mismatch_warnings_flags_divergence():
+    # Persona says English common, daemon is running Russian common -> warn.
+    marker = {"target": "nl", "common": "en"}
+    warnings = ptt.persona_mismatch_warnings(target="nl", common="ru", marker=marker)
+    assert len(warnings) == 1
+    assert "common" in warnings[0]
+
+
+def test_persona_mismatch_warnings_silent_when_consistent():
+    marker = {"target": "nl", "common": "en"}
+    assert ptt.persona_mismatch_warnings(target="nl", common="en", marker=marker) == []
+
+
+def test_persona_mismatch_warnings_silent_when_marker_absent():
+    # No marker -> nothing to compare against -> no false alarm.
+    assert ptt.persona_mismatch_warnings(target="nl", common="ru", marker={}) == []
+
+
+def test_persona_mismatch_warnings_flags_both_when_both_differ():
+    marker = {"target": "de", "common": "en"}
+    warnings = ptt.persona_mismatch_warnings(target="nl", common="ru", marker=marker)
+    assert len(warnings) == 2
 
 
 def _run_all() -> int:
