@@ -60,51 +60,89 @@ def test_selection_anchor_mixed_directions():
 
 # --- window_allowed --------------------------------------------------------
 
-def test_window_allowed_any_app_when_no_regex():
-    assert st.window_allowed("Anything at all", None) is True
-    assert st.window_allowed("", None) is True
+def test_window_allowed_any_app_when_no_filters():
+    assert st.window_allowed("Anything at all", "whatever.exe", None, None) is True
+    assert st.window_allowed("", "", None, None) is True
 
 
-def test_window_allowed_matches_regex():
-    assert st.window_allowed("Claude", r".*Claude.*") is True
-    assert st.window_allowed("Notepad", r".*Claude.*") is False
+def test_window_allowed_combines_exe_and_title_with_and():
+    # exe AND title must BOTH match — lets you pin one window of a multi-window app.
+    assert st.window_allowed("Project X", "Claude.exe", r"Project", "Claude.exe") is True
+    # exe matches but title doesn't -> blocked.
+    assert st.window_allowed("Other window", "Claude.exe", r"Project", "Claude.exe") is False
+    # title matches but exe doesn't -> blocked (the browser-leak case stays closed).
+    assert st.window_allowed("Project X", "firefox.exe", r"Project", "Claude.exe") is False
+
+
+def test_window_allowed_title_only_when_no_exe():
+    # With app_exe None, only the title regex applies (any process).
+    assert st.window_allowed("Claude — Firefox", "firefox.exe", r".*Claude.*", None) is True
+    assert st.window_allowed("Notepad", "notepad.exe", r".*Claude.*", None) is False
 
 
 def test_window_allowed_handles_empty_title_with_regex():
-    assert st.window_allowed("", r".*Claude.*") is False
+    assert st.window_allowed("", "Claude.exe", r".*Claude.*", None) is False
 
 
-def test_default_scope_requires_title_to_start_with_claude():
-    # Regression: the Claude-only default must NOT fire in a browser whose title
-    # merely *contains* "Claude" mid-string (the old `.*Claude.*` did). Only the
-    # app, whose window title starts with "Claude", should match.
-    re_ = st.DEFAULT_TOOLBAR_WINDOW_RE
-    assert st.window_allowed("Claude", re_) is True
-    assert st.window_allowed("Claude — Anthropic", re_) is True
-    assert st.window_allowed("Anthropic's Claude - Google Chrome", re_) is False
-    assert st.window_allowed("Reddit - r/Claude — Firefox", re_) is False
+def test_default_scope_matches_claude_exe_not_browser_title():
+    # The bug fix: the Claude-only default keys off the owning *process*, so a
+    # browser whose title contains "Claude" but whose exe is the browser does NOT
+    # trigger — only the real app (Claude.exe) does. Title is irrelevant here.
+    exe = st.DEFAULT_TOOLBAR_APP_EXE
+    assert st.window_allowed("anything", "Claude.exe", None, exe) is True
+    assert st.window_allowed("anything", "claude.exe", None, exe) is True  # case-insensitive
+    assert st.window_allowed("Anthropic's Claude — Mozilla Firefox", "firefox.exe", None, exe) is False
+    assert st.window_allowed("Claude", "chrome.exe", None, exe) is False
+    assert st.window_allowed("Claude", "", None, exe) is False  # exe undeterminable
 
 
-# --- resolve_window_re -----------------------------------------------------
+# --- resolve_window_re (title filter, AND-combined with the exe) -----------
 
 def test_resolve_window_re_cli_value_wins():
     assert st.resolve_window_re(".*Foo.*", {"toolbar_window_re": None}) == ".*Foo.*"
 
 
-def test_resolve_window_re_cli_empty_means_any_app():
-    assert st.resolve_window_re("", {}) is None
-
-
-def test_resolve_window_re_from_config_null_is_any_app():
-    assert st.resolve_window_re(None, {"toolbar_window_re": None}) is None
+def test_resolve_window_re_cli_empty_clears_it():
+    assert st.resolve_window_re("", {"toolbar_window_re": ".*X.*"}) is None
 
 
 def test_resolve_window_re_from_config_value():
     assert st.resolve_window_re(None, {"toolbar_window_re": ".*Claude.*"}) == ".*Claude.*"
 
 
-def test_resolve_window_re_defaults_to_claude_when_absent():
-    assert st.resolve_window_re(None, {}) == st.DEFAULT_TOOLBAR_WINDOW_RE
+def test_resolve_window_re_absent_is_none():
+    # No title regex by default — the default scope is exe-based, not title-based.
+    assert st.resolve_window_re(None, {}) is None
+
+
+# --- resolve_app_exe (default scope) ---------------------------------------
+
+def test_resolve_app_exe_cli_value_wins():
+    assert st.resolve_app_exe("Foo.exe", {"toolbar_app_exe": "Claude.exe"}) == "Foo.exe"
+
+
+def test_resolve_app_exe_cli_empty_means_any_app():
+    assert st.resolve_app_exe("", {}) is None
+
+
+def test_resolve_app_exe_from_config_null_is_any_app():
+    assert st.resolve_app_exe(None, {"toolbar_app_exe": None}) is None
+
+
+def test_resolve_app_exe_from_config_value():
+    assert st.resolve_app_exe(None, {"toolbar_app_exe": "Other.exe"}) == "Other.exe"
+
+
+def test_resolve_app_exe_defaults_to_claude_when_absent():
+    assert st.resolve_app_exe(None, {}) == st.DEFAULT_TOOLBAR_APP_EXE
+    assert st.DEFAULT_TOOLBAR_APP_EXE == "Claude.exe"
+
+
+def test_resolve_app_exe_backcompat_title_only_config_gets_no_exe():
+    # A pre-`toolbar_app_exe` config that expressed its scope via toolbar_window_re
+    # must NOT gain an exe requirement (AND-combine would otherwise change it).
+    assert st.resolve_app_exe(None, {"toolbar_window_re": ".*Claude.*"}) is None
+    assert st.resolve_app_exe(None, {"toolbar_window_re": None}) is None
 
 
 # --- clamp_to_screen -------------------------------------------------------

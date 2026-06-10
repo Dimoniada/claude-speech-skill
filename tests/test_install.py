@@ -109,7 +109,8 @@ def test_build_config_toolbar_defaults_enabled_claude_only():
         target_hotkey="f9", common_hotkey="f10",
     )
     assert config["selection_toolbar"] is True
-    assert config["toolbar_window_re"] == install.DEFAULT_TOOLBAR_WINDOW_RE
+    assert config["toolbar_window_re"] is None
+    assert config["toolbar_app_exe"] == install.DEFAULT_TOOLBAR_APP_EXE
 
 
 def test_build_config_toolbar_disabled_and_everywhere():
@@ -117,10 +118,10 @@ def test_build_config_toolbar_disabled_and_everywhere():
         target="Dutch", target_code="nl", common="English", common_code="en",
         voice="nl-NL-FennaNeural", input_device=None, output_device=None,
         target_hotkey="f9", common_hotkey="f10",
-        selection_toolbar=False, toolbar_window_re=None,
+        selection_toolbar=False, toolbar_app_exe=None,
     )
     assert config["selection_toolbar"] is False
-    assert config["toolbar_window_re"] is None
+    assert config["toolbar_app_exe"] is None
 
 
 def test_write_config_round_trips_through_json():
