@@ -102,6 +102,27 @@ def test_build_config_allows_null_devices():
     assert config["output_device"] is None
 
 
+def test_build_config_toolbar_defaults_enabled_claude_only():
+    config = install.build_config(
+        target="Dutch", target_code="nl", common="English", common_code="en",
+        voice="nl-NL-FennaNeural", input_device=None, output_device=None,
+        target_hotkey="f9", common_hotkey="f10",
+    )
+    assert config["selection_toolbar"] is True
+    assert config["toolbar_window_re"] == install.DEFAULT_TOOLBAR_WINDOW_RE
+
+
+def test_build_config_toolbar_disabled_and_everywhere():
+    config = install.build_config(
+        target="Dutch", target_code="nl", common="English", common_code="en",
+        voice="nl-NL-FennaNeural", input_device=None, output_device=None,
+        target_hotkey="f9", common_hotkey="f10",
+        selection_toolbar=False, toolbar_window_re=None,
+    )
+    assert config["selection_toolbar"] is False
+    assert config["toolbar_window_re"] is None
+
+
 def test_write_config_round_trips_through_json():
     config = install.build_config(
         target="Dutch", target_code="nl",
@@ -144,6 +165,8 @@ if __name__ == "__main__":
     test_rendered_settings_handles_spaces_in_interpreter_path()
     test_build_config_records_codes_devices_and_hotkeys()
     test_build_config_allows_null_devices()
+    test_build_config_toolbar_defaults_enabled_claude_only()
+    test_build_config_toolbar_disabled_and_everywhere()
     test_write_config_round_trips_through_json()
     test_claude_md_marker_matches_the_config_codes()
     print("ok")

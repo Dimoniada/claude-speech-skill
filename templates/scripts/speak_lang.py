@@ -29,19 +29,11 @@ DEFAULT_RATE = "-10%"
 SCRIPT_DIR = Path(__file__).resolve().parent
 LOG_PATH = SCRIPT_DIR.parent / "logs" / "speak_lang.log"
 
-# When a device name matches multiple endpoints (the same hardware is exposed
-# once per Windows host API), prefer modern reliable APIs. PortAudio's MME
-# wrapper truncates names to 31 chars and can silently route Bluetooth audio
-# to nowhere; WASAPI is the modern endpoint and works for BT/USB/HDMI alike.
-_HOST_API_PREFERENCE = ("wasapi", "directsound", "mme", "wdmks")
-
-
-def _host_api_rank(name: str) -> int:
-    n = name.lower().replace("-", "").replace(" ", "")
-    for i, key in enumerate(_HOST_API_PREFERENCE):
-        if key in n:
-            return i
-    return len(_HOST_API_PREFERENCE)
+# Shared audio-device helpers live in cs_common.py next to this script (it ships
+# in the same scripts/ dir even for --no-voice-in installs, so this import is
+# always satisfiable). Ensure our dir is importable however we were launched.
+sys.path.insert(0, str(SCRIPT_DIR))
+from cs_common import resolve_audio_device, format_device_list  # noqa: E402
 
 
 def setup_logging() -> None:
@@ -129,49 +121,9 @@ def play_mp3_mci(path: Path) -> None:
 
 
 def resolve_output_device(spec: str | None) -> int | None:
-    """Resolve an output-device spec (index or name substring) to an index.
-
-    Returns None for an empty spec (caller uses MCI / system default). Device
-    indices are not stable across reboots, so a name substring is preferred.
-    Raises ValueError on an invalid index or a name that matches nothing.
-    Logs and picks the lowest index when a name matches several endpoints
-    (the same hardware is usually exposed once per host API).
-    """
-    if not spec:
-        return None
-    import sounddevice as sd
-    spec = str(spec).strip()
-    devices = sd.query_devices()
-    if spec.isdigit():
-        idx = int(spec)
-        if idx < 0 or idx >= len(devices):
-            raise ValueError(f"output device index {idx} out of range (0..{len(devices) - 1})")
-        if devices[idx]["max_output_channels"] <= 0:
-            raise ValueError(f"device [{idx}] {devices[idx]['name']!r} has no output channels")
-        return idx
-    needle = spec.lower()
-    matches = [
-        i for i, d in enumerate(devices)
-        if d["max_output_channels"] > 0 and needle in d["name"].lower()
-    ]
-    if not matches:
-        raise ValueError(f"no output device name contains {spec!r}")
-    if len(matches) > 1:
-        matches.sort(key=lambda i: (
-            _host_api_rank(sd.query_hostapis(devices[i]["hostapi"])["name"]),
-            i,
-        ))
-        alts = ", ".join(
-            f"[{i}] {devices[i]['name']} ({sd.query_hostapis(devices[i]['hostapi'])['name']})"
-            for i in matches
-        )
-        chosen = matches[0]
-        logging.info(
-            "output device %r matched several; picked [%d] %s (%s). Candidates: %s",
-            spec, chosen, devices[chosen]["name"],
-            sd.query_hostapis(devices[chosen]["hostapi"])["name"], alts,
-        )
-    return matches[0]
+    """Output-device resolution via the shared helper. Thin wrapper kept because
+    selection_toolbar.speak_text reuses speak_lang.resolve_output_device."""
+    return resolve_audio_device(spec, want_input=False)
 
 
 def play_mp3_sounddevice(path: Path, device: int) -> None:
@@ -211,17 +163,6 @@ def play_mp3(path: Path, output_device: int | None) -> None:
         play_mp3_sounddevice(path, output_device)
 
 
-def format_device_list() -> str:
-    """Human-readable listing of output audio devices (for --list-devices)."""
-    import sounddevice as sd
-    lines = ["Output devices (speakers/headphones — for TTS playback):"]
-    for i, d in enumerate(sd.query_devices()):
-        if d["max_output_channels"] > 0:
-            host = sd.query_hostapis(d["hostapi"])["name"]
-            lines.append(f"  [{i}] {d['name']}  (out={d['max_output_channels']}, {host})")
-    return "\n".join(lines)
-
-
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="claude-speech Stop-hook TTS")
     # --voice/--tag are required for playback but not for --list-devices, so
@@ -246,7 +187,7 @@ def main(argv: list[str]) -> int:
     args = parse_args(argv)
 
     if args.list_devices:
-        print(format_device_list())
+        print(format_device_list(include_inputs=False))
         return 0
 
     setup_logging()
@@ -256,7 +197,7 @@ def main(argv: list[str]) -> int:
         return 0
 
     try:
-        output_device = resolve_output_device(args.output_device)
+        output_device = resolve_audio_device(args.output_device, want_input=False)
     except ValueError as exc:
         logging.error("output device: %s", exc)
         return 0

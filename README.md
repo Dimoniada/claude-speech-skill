@@ -1,9 +1,10 @@
 # claude-speech
 
-A Claude Code skill that turns any project into a **language-learning workspace** with two-way voice:
+A Claude Code skill that turns any project into a **language-learning workspace** with two-way voice plus an on-screen reading aid:
 
 - **Output (TTS)** — Claude speaks target-language phrases aloud, native-language notes stay silent.
 - **Input (push-to-talk, two keys)** — hold **F9** to speak the language you're learning, or **F10** to speak your native language. Release, and local Whisper transcribes in the language the held key forces (no auto-detection, so mixed-language speech isn't misread). For the learned language espeak-ng adds an IPA line; your message then appears in the chat as your message automatically.
+- **Selection toolbar** — select any text on screen and a small floating toolbar appears: **🔊** reads it aloud in the target-language voice, **🌐** shows an offline translation into your native language with a collapsible IPA transcription. Defaults to working only inside the Claude app. See [Selection toolbar](#selection-toolbar).
 
 Unlike whole-response TTS plugins, `claude-speech` reads **only** the text inside language tags, so mixed-language replies (a learned-language sentence + a native-language correction) sound natural — you hear the part you're practicing, you read the part that explains it. The voice-input side keeps everything local: no audio leaves your machine.
 
@@ -13,11 +14,14 @@ The skill scaffolds these files into your project:
 
 | File | Role |
 |---|---|
-| `CLAUDE.md` | Teacher persona for the chosen language, with tag rules |
+| `CLAUDE.md` | Teacher persona for the chosen language, with tag rules (and a machine-readable config marker) |
 | `.claude/settings.json` | `Stop` hook (TTS) + `UserPromptSubmit` hook (voice-in fallback) |
+| `.claude/claude_speech.json` | **Single source of truth** — languages, voice, devices, hotkeys, toolbar settings. The daemon and toolbar read it. See [Configuration](#configuration-claude_speechjson) |
 | `scripts/speak_lang.py` | Extracts tagged text from Claude's reply, synthesizes via `edge-tts`, plays via Windows MCI |
 | `scripts/push_to_talk.py` | Two-key daemon (F9 = learned language + IPA, F10 = native language): records mic → Whisper → IPA → pastes into chat |
 | `scripts/inject_transcript.py` | UserPromptSubmit hook that injects the last transcript if auto-paste couldn't focus the chat window |
+| `scripts/selection_toolbar.py` | Floating select-text → 🔊 read / 🌐 translate toolbar (separate background process). See [Selection toolbar](#selection-toolbar) |
+| `scripts/cs_common.py` | Shared helpers (config loading, audio-device resolution) imported by the scripts above |
 
 **Output flow.** When Claude finishes a reply, the Stop hook reads the transcript, pulls every `<{code}>...</{code}>` block (where `{code}` is the ISO 639-1 code of the language you're learning), and pipes them to `edge-tts` for playback.
 
@@ -158,7 +162,7 @@ In a Claude Code session, the skill responds to a control argument:
 
 This is a full off switch for **both** directions of voice:
 
-- **Voice in** — terminates every running `push_to_talk.py` daemon and clears any pending `latest_transcript.txt` so the fallback hook doesn't keep re-injecting stale content.
+- **Voice in** — terminates every running `push_to_talk.py` daemon **and any `selection_toolbar.py` process**, and clears any pending `latest_transcript.txt` so the fallback hook doesn't keep re-injecting stale content.
 - **Voice out** — runs `toggle_voice.py --off`, which surgically removes the `speak_lang.py` Stop hook from `.claude/settings.json` (your other hooks and settings are left untouched) and stashes an exact copy in `.claude/speak_lang.hook.json`. Spoken replies stop firing even if Claude still emits `<{code}>` tags. (The hook fires every turn once installed — there's no runtime "skill is active" state in Claude Code — so removing it is the only honest way to silence output.)
 
 Aliases: `stop`, `kill`.
@@ -167,9 +171,79 @@ Aliases: `stop`, `kill`.
 
 Invoking it *with* a language (`/claude-speech German Russian`) instead runs a full re-initialization for that language and turns voice back on. The skill recovers your previous settings (language, voice, devices) and offers them as defaults, so you only answer what's changing. You never need to type `--force` — it's an internal installer flag the skill manages on your behalf when an existing setup has to be regenerated.
 
+## Selection toolbar
+
+Beyond the two-key voice input, the skill installs an optional **selection toolbar**: a separate
+background process (`scripts/selection_toolbar.py`) that watches for text selections and pops up a
+small floating toolbar at the cursor. It's enabled by default; the skill auto-starts it, or run it
+yourself in a separate terminal:
+
+```powershell
+py scripts\selection_toolbar.py
+```
+
+No flags are needed — it reads the voice, output device, language pair, and scope from
+`.claude/claude_speech.json` (see [Configuration](#configuration-claude_speechjson)).
+
+**How it works.** Select text by **dragging** across it; on release the toolbar copies the selection
+(it saves and restores your clipboard) and shows two toggle buttons at the lower-right of the selection:
+
+- **🔊 Read** — speaks the selection aloud in the target-language voice (reuses the same `edge-tts`
+  path as the Stop hook). Click again while it's playing to stop. Playback runs in its own short-lived
+  child process, so interrupting it can never affect the toolbar.
+- **🌐 Translate** — opens a borderless, resizable, scrollable popup with an **offline** translation
+  into your common language ([`argostranslate`](https://github.com/argosopentech/argos-translate)),
+  plus a collapsible **▸ IPA** transcription (rendered with the same espeak-ng path as F9). Click 🌐
+  again to hide it.
+
+**Scope (Claude-only by default).** Out of the box the toolbar only appears when the **Claude app**
+window is focused, so it doesn't pop up while you select text elsewhere. To let it work in any
+application, install with `--toolbar-everywhere` (or set `toolbar_window_re` to `null` in
+`claude_speech.json`). Note that it always reads/translates as the target language, so non-target text
+elsewhere will be mishandled.
+
+**Dependencies.** The toolbar uses `edge-tts` (via `speak_lang.py`), `argostranslate` (offline
+translation), and `pynput`/`pyperclip` — all pip-installed by `install.py`. The first time you press
+🌐 it downloads the `target→common` Argos model once (a few hundred MB), then works fully offline.
+
+**Disabling / stopping.** Install with `--no-selection-toolbar` to skip it entirely (the script isn't
+even scaffolded). When running, `/claude-speech off` terminates it alongside the push-to-talk daemon.
+
+## Configuration (`claude_speech.json`)
+
+`install.py` writes `.claude/claude_speech.json` **in lockstep with `CLAUDE.md`, from the same
+arguments** — it's the single source of truth for the project's setup:
+
+```json
+{
+  "target": "Dutch",          "target_code": "nl",
+  "common": "English",        "common_code": "en",
+  "voice": "nl-NL-FennaNeural",
+  "input_device": "USB PnP",  "output_device": "OnePlus Bullets",
+  "target_hotkey": "f9",      "common_hotkey": "f10",
+  "selection_toolbar": true,  "toolbar_window_re": ".*Claude.*"
+}
+```
+
+The **push-to-talk daemon** and the **selection toolbar** both read this file, so you launch them with
+no flags and they always match the teacher persona — `py scripts\push_to_talk.py` and
+`py scripts\selection_toolbar.py` need nothing else. An explicit CLI flag still overrides the
+corresponding config value for that run.
+
+To prevent the persona and the voice-in pipeline from silently drifting apart, `install.py` also
+embeds a marker comment in `CLAUDE.md`:
+
+```html
+<!-- claude-speech: target=nl common=en voice=nl-NL-FennaNeural -->
+```
+
+The daemon parses it at startup and prints a loud warning if the languages it's running with don't
+match what the persona declares. Because the config and the persona are generated together, this only
+fires if one was hand-edited — re-run `/claude-speech <target> <common>` to regenerate both.
+
 ## Voice input — binary dependencies
 
-The Python scaffold (`push_to_talk.py`, `inject_transcript.py`) is shipped by `install.py`. The **binary deps are not** — too large for a git repo, and license/distribution rules differ. You provision them yourself, once, into the project's `tools/` directory.
+The Python scaffold (`push_to_talk.py`, `inject_transcript.py`, `selection_toolbar.py`, `cs_common.py`) is shipped by `install.py`. The **binary deps are not** — too large for a git repo, and license/distribution rules differ. You provision them yourself, once, into the project's `tools/` directory.
 
 Assuming your project is `D:\Data\my-project`, run the commands below in PowerShell from that directory. The three blocks are independent and can be done in any order.
 
@@ -249,12 +323,16 @@ The daemon sets `ESPEAK_DATA_PATH` automatically when it shells out to `espeak-n
 
 ```
 your-project\
-├── .claude\settings.json
+├── .claude\
+│   ├── settings.json
+│   └── claude_speech.json    (single source of truth — languages, voice, devices, toolbar)
 ├── CLAUDE.md
 ├── scripts\
 │   ├── speak_lang.py
 │   ├── push_to_talk.py
-│   └── inject_transcript.py
+│   ├── inject_transcript.py
+│   ├── selection_toolbar.py  (the select-text → 🔊/🌐 toolbar)
+│   └── cs_common.py          (shared config + audio-device helpers)
 ├── recordings\               (created on first F9 release)
 ├── logs\
 └── tools\
@@ -418,6 +496,10 @@ py install.py --target Dutch --common Russian --force
 
 # TTS-only — skip the push-to-talk scripts and their Python deps
 py install.py --target Dutch --common Russian --no-voice-in
+
+# Selection toolbar: skip it entirely, or let it work in any app (default: Claude-only)
+py install.py --target Dutch --common Russian --no-selection-toolbar
+py install.py --target Dutch --common Russian --toolbar-everywhere
 ```
 
 After install, open the project directory in Claude Code and start chatting. The first time you say "hi", the assistant greets you in the chosen language and your speakers play the audio.
@@ -509,12 +591,24 @@ The language is forced by which key you hold — **F9** decodes as your target l
 **Daemon's terminal shows IPA garbled as `???` or hex.**
 PowerShell defaults to cp1252 codepage. The daemon already forces UTF-8 on stdout via `sys.stdout.reconfigure(encoding='utf-8')`, but if you're piping the daemon's output through another tool that re-encodes, you may need `chcp 65001` in your terminal session.
 
+### Selection toolbar
+
+**The toolbar doesn't appear when I select text.**
+By default it's **Claude-only** — it only shows when the Claude app window is focused. Selecting text in another app won't trigger it unless you installed with `--toolbar-everywhere` (or set `toolbar_window_re` to `null`). Also note it triggers on a **drag**-select, not a double-click word-select. Confirm the process is running and check `logs/selection_toolbar.log`.
+
+**🌐 Translate is slow the first time, or shows "translation unavailable".**
+The first translate downloads the `target→common` Argos model (a few hundred MB) — that one time needs internet. If it never succeeds, check `logs/selection_toolbar.log`; make sure `argostranslate` is installed for the same interpreter (`py -m pip install --user argostranslate`) and that a model exists for your language pair. The 🔊 read button is unaffected.
+
+**🔊 Read plays nothing.**
+Same causes as the Stop hook (see "No audio plays" above) — edge-tts couldn't reach Microsoft's endpoint, or the configured output device is wrong. Playback runs in a child process; errors are logged to `logs/selection_toolbar.log`.
+
 ## Prerequisites
 
 - **Windows** — TTS playback uses Windows MCI via `ctypes`; voice-input window automation uses `pywinauto`. Linux/Mac support is a TODO.
 - **Python 3.9+** — `py` launcher should be on PATH.
 - **Internet access** — edge-tts uses Microsoft's online TTS endpoint. Voice-input is fully local once binary deps are installed.
 - **For voice-input only** — ~1.5 GB of binary deps you provision manually (whisper.cpp, ~540 MB ggml model, ~80 MB espeak-ng). See "Voice input — binary dependencies".
+- **For the selection toolbar's 🌐 translate** — [`argostranslate`](https://github.com/argosopentech/argos-translate) (pip-installed by `install.py`). It downloads the `target→common` model once on first use (a few hundred MB), then translates fully offline. The 🔊 read button works without it.
 
 ## Why not just use an existing TTS plugin?
 

@@ -50,6 +50,10 @@ CONFIG_NAME = "claude_speech.json"
 DEFAULT_TARGET_HOTKEY = "f9"
 DEFAULT_COMMON_HOTKEY = "f10"
 
+# Selection-toolbar default scope (must match selection_toolbar.DEFAULT_TOOLBAR_WINDOW_RE):
+# Claude-only unless the user opts into "everywhere".
+DEFAULT_TOOLBAR_WINDOW_RE = r".*Claude.*"
+
 
 def load_voices() -> list[dict]:
     with VOICES_PATH.open(encoding="utf-8") as f:
@@ -103,11 +107,13 @@ def build_config(
     *, target: str, target_code: str, common: str, common_code: str, voice: str,
     input_device: str | None, output_device: str | None,
     target_hotkey: str, common_hotkey: str,
+    selection_toolbar: bool = True, toolbar_window_re: str | None = DEFAULT_TOOLBAR_WINDOW_RE,
 ) -> dict:
     """Assemble the claude_speech.json payload — the single source of truth the
-    push-to-talk daemon reads for languages, mic, and hotkeys when it isn't told
-    them explicitly. Kept as a pure function so it can be unit-tested without
-    touching the filesystem."""
+    push-to-talk daemon and selection toolbar read when not told explicitly.
+    `selection_toolbar` gates whether the toolbar is launched; `toolbar_window_re`
+    is its scope (Claude-only by default, or null for any application). Kept as a
+    pure function so it can be unit-tested without touching the filesystem."""
     return {
         "target": target,
         "target_code": target_code,
@@ -118,6 +124,8 @@ def build_config(
         "output_device": output_device,
         "target_hotkey": target_hotkey,
         "common_hotkey": common_hotkey,
+        "selection_toolbar": selection_toolbar,
+        "toolbar_window_re": toolbar_window_re,
     }
 
 
@@ -238,6 +246,7 @@ def ensure_pip_packages(packages: list[str], group_label: str) -> None:
         "pywinauto": "pywinauto",
         "pyperclip": "pyperclip",
         "miniaudio": "miniaudio",
+        "argostranslate": "argostranslate",
     }
     missing = []
     for pkg in packages:
@@ -262,7 +271,7 @@ TTS_DEPS = ["edge-tts"]
 # Note: whisper.cpp, the ggml model, and espeak-ng are binary deps — NOT pip
 # installable. The README documents how to provision them manually. This list
 # is only the Python side.
-VOICE_IN_DEPS = ["numpy", "sounddevice", "scipy", "pynput", "pywinauto", "pyperclip"]
+VOICE_IN_DEPS = ["numpy", "sounddevice", "scipy", "pynput", "pywinauto", "pyperclip", "argostranslate"]
 
 # Required only when TTS plays to a chosen output device (speak_lang.py
 # --output-device): miniaudio decodes the edge-tts MP3 so sounddevice can play
@@ -287,6 +296,10 @@ def main(argv: list[str]) -> int:
     )
     parser.add_argument("--target-hotkey", help=f"push-to-talk key for the target language, recorded in {CONFIG_NAME} (default: {DEFAULT_TARGET_HOTKEY})")
     parser.add_argument("--common-hotkey", help=f"push-to-talk key for the common language, recorded in {CONFIG_NAME} (default: {DEFAULT_COMMON_HOTKEY})")
+    parser.add_argument("--no-selection-toolbar", action="store_true",
+                        help=f"disable the select-text-to-read/translate toolbar (recorded in {CONFIG_NAME}; default: enabled)")
+    parser.add_argument("--toolbar-everywhere", action="store_true",
+                        help="let the selection toolbar work in any application (default: only inside the Claude app)")
     parser.add_argument("--project-dir", dest="project_dir", help="project directory to scaffold into (default: $CLAUDE_PROJECT_DIR or CWD)")
     parser.add_argument("--force", action="store_true", help="overwrite existing files")
     parser.add_argument("--skip-pip", action="store_true", help="don't run any pip installs (TTS or voice-in)")
@@ -382,6 +395,8 @@ def main(argv: list[str]) -> int:
             output_device=args.output_device,
             target_hotkey=args.target_hotkey or DEFAULT_TARGET_HOTKEY,
             common_hotkey=args.common_hotkey or DEFAULT_COMMON_HOTKEY,
+            selection_toolbar=not args.no_selection_toolbar,
+            toolbar_window_re=(None if args.toolbar_everywhere else DEFAULT_TOOLBAR_WINDOW_RE),
         ))
 
     # .claude/settings.json
@@ -403,9 +418,13 @@ def main(argv: list[str]) -> int:
         print(f"  cleared voice-off stash (superseded by install): {stash}")
 
     # scripts/ — copy each script verbatim (no template substitutions)
-    scripts_to_copy = ["speak_lang.py"]
+    # cs_common.py is a base dependency: speak_lang.py (the TTS Stop hook) imports
+    # it, so it ships even in --no-voice-in (TTS-only) installs.
+    scripts_to_copy = ["speak_lang.py", "cs_common.py"]
     if not args.no_voice_in:
         scripts_to_copy.extend(["push_to_talk.py", "inject_transcript.py"])
+        if not args.no_selection_toolbar:
+            scripts_to_copy.append("selection_toolbar.py")
 
     for name in scripts_to_copy:
         script_src = TPL_DIR / "scripts" / name
