@@ -23,6 +23,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "templates" / "scripts"))
 
 import push_to_talk as ptt  # noqa: E402
+import cs_common  # noqa: E402  (resolve_audio_device/_host_api_rank now live here)
 
 
 # --- parse_whisper_json ----------------------------------------------------
@@ -137,17 +138,19 @@ def _usb_mic_quadruple():
 
 
 def _with_fake_sd(fake, fn):
-    """Run ``fn`` with ``ptt.sd`` swapped for ``fake`` and restored after.
+    """Run ``fn`` with ``cs_common.sd`` swapped for ``fake`` and restored after.
 
-    Plain try/finally instead of pytest's monkeypatch so the file still runs
-    under the bare ``py tests/test_push_to_talk.py`` path used by _run_all.
+    The device-resolution helpers live in cs_common now (re-exported into ptt),
+    and they read the module global ``cs_common.sd`` — so that's the injection
+    point. Plain try/finally instead of pytest's monkeypatch so the file still
+    runs under the bare ``py tests/test_push_to_talk.py`` path used by _run_all.
     """
-    original = ptt.sd
-    ptt.sd = fake
+    original = cs_common.sd
+    cs_common.sd = fake
     try:
         return fn()
     finally:
-        ptt.sd = original
+        cs_common.sd = original
 
 
 def test_resolve_audio_device_prefers_wasapi_over_lower_index_mme():

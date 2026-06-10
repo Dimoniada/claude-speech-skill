@@ -93,6 +93,17 @@ LATEST_TRANSCRIPT = RECORDINGS_DIR / "latest_transcript.txt"
 CONFIG_PATH = PROJECT_ROOT / ".claude" / "claude_speech.json"
 CLAUDE_MD_PATH = PROJECT_ROOT / "CLAUDE.md"
 
+# Shared helpers (config loading + audio-device resolution) live in cs_common.py
+# next to this script. Ensure our own dir is importable whether we're run directly
+# or imported by another script (e.g. selection_toolbar's IPA reuse).
+sys.path.insert(0, str(SCRIPT_DIR))
+from cs_common import (  # noqa: E402
+    load_project_config,
+    resolve_audio_device,
+    format_device_list,
+    _host_api_rank,
+)
+
 SAMPLE_RATE = 16000  # whisper.cpp expects 16 kHz mono
 WHISPER_DIR = PROJECT_ROOT / "tools" / "whisper.cpp"
 DEFAULT_WHISPER_SERVER = WHISPER_DIR / "bin" / "Release" / "whisper-server.exe"
@@ -121,22 +132,6 @@ LANG_TO_ESPEAK_VOICE: dict[str, str] = {
     "en": "en-us",
     "zh": "cmn",
 }
-
-
-def load_project_config(path: Path = CONFIG_PATH) -> dict:
-    """Read .claude/claude_speech.json — the source of truth install.py writes
-    next to CLAUDE.md. A missing or unreadable file yields {}, so the daemon
-    simply falls back to CLI args and built-in defaults (the pre-config
-    behaviour) instead of failing."""
-    try:
-        with path.open(encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except FileNotFoundError:
-        return {}
-    except (OSError, json.JSONDecodeError) as exc:
-        logging.warning("could not read project config %s: %s", path, exc)
-        return {}
 
 
 def parse_persona_marker(text: str) -> dict:
@@ -193,90 +188,6 @@ def resolve_hotkey(name: str) -> keyboard.Key | keyboard.KeyCode:
     if len(key) == 1:
         return keyboard.KeyCode.from_char(key)
     raise ValueError(f"unknown hotkey: {name!r}")
-
-
-def format_device_list() -> str:
-    """Return a human-readable listing of input and output audio devices."""
-    lines = ["Input devices (microphones — for push-to-talk):"]
-    for i, d in enumerate(sd.query_devices()):
-        if d["max_input_channels"] > 0:
-            host = sd.query_hostapis(d["hostapi"])["name"]
-            lines.append(f"  [{i}] {d['name']}  (in={d['max_input_channels']}, {host})")
-    lines.append("Output devices (speakers/headphones — for TTS playback):")
-    for i, d in enumerate(sd.query_devices()):
-        if d["max_output_channels"] > 0:
-            host = sd.query_hostapis(d["hostapi"])["name"]
-            lines.append(f"  [{i}] {d['name']}  (out={d['max_output_channels']}, {host})")
-    return "\n".join(lines)
-
-
-# When a device name matches multiple endpoints (the same hardware is exposed
-# once per Windows host API), prefer modern reliable APIs. PortAudio's MME
-# wrapper truncates names to 31 chars and can silently route Bluetooth audio
-# to nowhere; WASAPI is the modern endpoint and works for BT/USB/HDMI alike.
-_HOST_API_PREFERENCE = ("wasapi", "directsound", "mme", "wdmks")
-
-
-def _host_api_rank(name: str) -> int:
-    n = name.lower().replace("-", "").replace(" ", "")
-    for i, key in enumerate(_HOST_API_PREFERENCE):
-        if key in n:
-            return i
-    return len(_HOST_API_PREFERENCE)
-
-
-def resolve_audio_device(spec: str | None, want_input: bool) -> int | None:
-    """Resolve a device spec to a sounddevice device index.
-
-    `spec` may be a device index ("9") or a case-insensitive substring of the
-    device name ("USB PnP"). Names are preferred in practice because device
-    *indices* are not stable across reboots or replugs, while the name is.
-
-    Returns None when `spec` is empty (caller should use the system default).
-    Raises ValueError when an index is invalid or a name matches nothing.
-    When a name matches several devices (the same hardware is usually exposed
-    once per host API — MME, DirectSound, WASAPI, …) the most reliable host
-    API wins (WASAPI > DirectSound > MME > WDM-KS), and the alternatives are
-    logged.
-    """
-    if not spec:
-        return None
-    spec = str(spec).strip()
-    devices = sd.query_devices()
-    chan_key = "max_input_channels" if want_input else "max_output_channels"
-    kind = "input" if want_input else "output"
-
-    if spec.isdigit():
-        idx = int(spec)
-        if idx < 0 or idx >= len(devices):
-            raise ValueError(f"device index {idx} out of range (0..{len(devices) - 1})")
-        if devices[idx][chan_key] <= 0:
-            raise ValueError(f"device [{idx}] {devices[idx]['name']!r} has no {kind} channels")
-        return idx
-
-    needle = spec.lower()
-    matches = [
-        i for i, d in enumerate(devices)
-        if d[chan_key] > 0 and needle in d["name"].lower()
-    ]
-    if not matches:
-        raise ValueError(f"no {kind} device name contains {spec!r} (try --list-devices)")
-    if len(matches) > 1:
-        matches.sort(key=lambda i: (
-            _host_api_rank(sd.query_hostapis(devices[i]["hostapi"])["name"]),
-            i,
-        ))
-        alts = ", ".join(
-            f"[{i}] {devices[i]['name']} ({sd.query_hostapis(devices[i]['hostapi'])['name']})"
-            for i in matches
-        )
-        chosen = matches[0]
-        logging.info(
-            "%s device %r matched several; picked [%d] %s (%s). Candidates: %s",
-            kind, spec, chosen, devices[chosen]["name"],
-            sd.query_hostapis(devices[chosen]["hostapi"])["name"], alts,
-        )
-    return matches[0]
 
 
 def next_sequence_number(lang: str) -> int:
