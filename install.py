@@ -50,10 +50,10 @@ CONFIG_NAME = "claude_speech.json"
 DEFAULT_TARGET_HOTKEY = "f9"
 DEFAULT_COMMON_HOTKEY = "f10"
 
-# Selection-toolbar default scope (must match selection_toolbar.DEFAULT_TOOLBAR_WINDOW_RE):
-# Claude-only unless the user opts into "everywhere". Anchored at the start so a
-# browser page that merely mentions "Claude" mid-title doesn't count — only the app.
-DEFAULT_TOOLBAR_WINDOW_RE = r"^Claude"
+# Selection-toolbar default scope (must match selection_toolbar.DEFAULT_TOOLBAR_APP_EXE):
+# restricted to the Claude desktop app's process, unless the user opts into
+# "everywhere". Matching the exe (not the window title) keeps it out of browsers.
+DEFAULT_TOOLBAR_APP_EXE = "Claude.exe"
 
 
 def load_voices() -> list[dict]:
@@ -108,13 +108,16 @@ def build_config(
     *, target: str, target_code: str, common: str, common_code: str, voice: str,
     input_device: str | None, output_device: str | None,
     target_hotkey: str, common_hotkey: str,
-    selection_toolbar: bool = True, toolbar_window_re: str | None = DEFAULT_TOOLBAR_WINDOW_RE,
+    selection_toolbar: bool = True, toolbar_window_re: str | None = None,
+    toolbar_app_exe: str | None = DEFAULT_TOOLBAR_APP_EXE,
 ) -> dict:
     """Assemble the claude_speech.json payload — the single source of truth the
     push-to-talk daemon and selection toolbar read when not told explicitly.
-    `selection_toolbar` gates whether the toolbar is launched; `toolbar_window_re`
-    is its scope (Claude-only by default, or null for any application). Kept as a
-    pure function so it can be unit-tested without touching the filesystem."""
+    `selection_toolbar` gates whether the toolbar is launched; its scope is
+    `toolbar_app_exe` (Claude-only by default, or null for any application),
+    optionally narrowed further by `toolbar_window_re` (a title regex AND-combined
+    with the exe). Kept as a pure function so it can be unit-tested without
+    touching the filesystem."""
     return {
         "target": target,
         "target_code": target_code,
@@ -127,6 +130,7 @@ def build_config(
         "common_hotkey": common_hotkey,
         "selection_toolbar": selection_toolbar,
         "toolbar_window_re": toolbar_window_re,
+        "toolbar_app_exe": toolbar_app_exe,
     }
 
 
@@ -397,7 +401,7 @@ def main(argv: list[str]) -> int:
             target_hotkey=args.target_hotkey or DEFAULT_TARGET_HOTKEY,
             common_hotkey=args.common_hotkey or DEFAULT_COMMON_HOTKEY,
             selection_toolbar=not args.no_selection_toolbar,
-            toolbar_window_re=(None if args.toolbar_everywhere else DEFAULT_TOOLBAR_WINDOW_RE),
+            toolbar_app_exe=(None if args.toolbar_everywhere else DEFAULT_TOOLBAR_APP_EXE),
         ))
 
     # .claude/settings.json

@@ -10,15 +10,18 @@ voice and output device taken from .claude/claude_speech.json.
 This is task 1 of two: the toolbar framework + the Read button. A 🌐 Translate
 button (with a translation popup) is planned next and slots in beside 🔊.
 
-Scope: by default the toolbar appears only inside the Claude app (window titles
-starting with "Claude"). Pass --window-title-re '<regex>' to override the scope
-(e.g. '^Claude' for Claude-only, or '' for any application). Note it always
-speaks with the configured (target-language) voice, so non-target text elsewhere
-will be mispronounced.
+Scope: by default the toolbar appears only inside the Claude app, matched by its
+owning process (Claude.exe) rather than the window title — so a browser on
+claude.ai doesn't count. The exe (--app-exe) and an optional title regex
+(--window-title-re) combine with AND, so you can pin one window of an app that
+has several. Pass --app-exe "" to allow any application. Note it always speaks
+with the configured (target-language) voice, so non-target text elsewhere will be
+mispronounced.
 
 Usage (from a separate terminal, leave it running):
     py selection_toolbar.py
-    py selection_toolbar.py --window-title-re "^Claude"
+    py selection_toolbar.py --app-exe ""                          # any application
+    py selection_toolbar.py --window-title-re "Project X"         # Claude.exe AND title
     py selection_toolbar.py --voice nl-NL-FennaNeural --output-device "Headphones"
 
 Press Ctrl+C in this terminal to stop.
@@ -28,6 +31,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import ctypes
+from ctypes import wintypes
 import json
 import logging
 import re
@@ -85,10 +89,11 @@ TOOLBAR_OFFSET_Y = 16        # selection end (mouse-release point)
 COLOR_IDLE = "white"         # button foreground when inactive
 COLOR_BUSY = "#6b6c6e"       # button foreground while its action is active (grayed)
 POPUP_MARGIN = 2             # uniform inset for the translation popup's contents
-DEFAULT_TOOLBAR_WINDOW_RE = r"^Claude"  # default scope: only inside the Claude app
-# Anchored at the start so a browser page that merely mentions "Claude" mid-title
-# (e.g. "Anthropic's Claude - Chrome") doesn't count — only the app, whose window
-# title starts with "Claude", does. Match is case-sensitive (re.search).
+DEFAULT_TOOLBAR_APP_EXE = "Claude.exe"  # default scope: only inside the Claude app
+# Match the foreground window's owning *process* (Claude.exe), not its title: a
+# browser on claude.ai — or any page that merely mentions "Claude" — shares the
+# title but never the exe, which is what made the title regex leak into browsers.
+# An optional toolbar_window_re narrows further (AND), to pin one window of an app.
 
 
 def setup_logging() -> None:
@@ -117,23 +122,45 @@ def selection_anchor(press_xy: tuple[int, int], release_xy: tuple[int, int]) -> 
     return (max(press_xy[0], release_xy[0]), max(press_xy[1], release_xy[1]))
 
 
-def window_allowed(foreground_title: str, window_title_re: str | None) -> bool:
-    """Scope gate: with no regex the toolbar works in any app; with a regex it
-    only fires when the foreground window title matches."""
-    if not window_title_re:
-        return True
-    return re.search(window_title_re, foreground_title or "") is not None
+def window_allowed(foreground_title: str, foreground_exe: str | None,
+                   window_title_re: str | None, app_exe: str | None) -> bool:
+    """Scope gate: the toolbar fires only when *every* configured filter matches
+    (AND). `app_exe` (the Claude-only default) requires the foreground process's
+    exe basename, case-insensitively; `window_title_re` additionally requires the
+    title to match — so you can pin one window of an app that has several. A
+    filter left None/empty isn't applied; with neither set, any app passes."""
+    if app_exe and (foreground_exe or "").lower() != app_exe.lower():
+        return False
+    if window_title_re and re.search(window_title_re, foreground_title or "") is None:
+        return False
+    return True
 
 
 def resolve_window_re(cli_value: str | None, config: dict) -> str | None:
-    """Effective scope filter: an explicit --window-title-re wins; otherwise the
-    project config's `toolbar_window_re` (which may be null = everywhere); and if
-    that key is absent entirely, default to Claude-only."""
+    """Additional title-regex scope filter (combined with the exe via AND). An
+    explicit --window-title-re wins; otherwise the project config's
+    `toolbar_window_re`; otherwise None (no title constraint — the default scope
+    is the exe; see resolve_app_exe)."""
     if cli_value is not None:
         return cli_value or None
-    if "toolbar_window_re" in (config or {}):
-        return config["toolbar_window_re"]
-    return DEFAULT_TOOLBAR_WINDOW_RE
+    return (config or {}).get("toolbar_window_re")
+
+
+def resolve_app_exe(cli_value: str | None, config: dict) -> str | None:
+    """Effective process-exe scope filter (combined with the title regex via AND
+    in window_allowed): an explicit --app-exe wins; otherwise the project config's
+    `toolbar_app_exe` (which may be null = any app). If that key is absent, default
+    to Claude-only — unless the config is a pre-`toolbar_app_exe` one that already
+    expressed its scope via `toolbar_window_re`, in which case don't bolt an exe
+    requirement onto it (preserve the old title-only behaviour)."""
+    config = config or {}
+    if cli_value is not None:
+        return cli_value or None
+    if "toolbar_app_exe" in config:
+        return config["toolbar_app_exe"]
+    if "toolbar_window_re" in config:
+        return None
+    return DEFAULT_TOOLBAR_APP_EXE
 
 
 def clamp_to_screen(x: int, y: int, w: int, h: int, screen_w: int, screen_h: int,
@@ -187,6 +214,42 @@ def foreground_window_title() -> str:
     buf = ctypes.create_unicode_buffer(length + 1)
     user32.GetWindowTextW(handle, buf, length + 1)
     return buf.value
+
+
+def foreground_window_exe() -> str:
+    """Basename of the executable owning the foreground window (e.g. "Claude.exe"),
+    or "" if it can't be determined. Used for the Claude-only scope gate — far more
+    robust than the window title, which a browser tab on claude.ai also carries."""
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    # Declare restype/argtypes so handles aren't truncated to 32 bits on 64-bit
+    # Python — a truncated handle would make QueryFullProcessImageNameW fail.
+    user32.GetForegroundWindow.restype = wintypes.HWND
+    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+    kernel32.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+    hwnd = user32.GetForegroundWindow()
+    pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    if not pid.value:
+        return ""
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+    if not handle:
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(32768)
+        size = wintypes.DWORD(len(buf))
+        if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+            return buf.value.rsplit("\\", 1)[-1]
+        return ""
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def set_dpi_awareness() -> None:
@@ -743,7 +806,7 @@ class SelectionToolbar:
 
 
 def make_mouse_listener(app: SelectionToolbar, window_title_re: str | None,
-                        threshold: int) -> mouse.Listener:
+                        app_exe: str | None, threshold: int) -> mouse.Listener:
     """Build the pynput mouse listener that turns a left-drag into a toolbar."""
     state: dict[str, tuple[int, int, float] | None] = {"press": None}
 
@@ -763,7 +826,10 @@ def make_mouse_listener(app: SelectionToolbar, window_title_re: str | None,
             return
         if not is_drag((press[0], press[1]), (x, y), threshold):
             return
-        if not window_allowed(foreground_window_title(), window_title_re):
+        # Query the owning process only when an exe filter is configured, so the
+        # title-only / everywhere scopes skip the extra Win32 call.
+        exe = foreground_window_exe() if app_exe else ""
+        if not window_allowed(foreground_window_title(), exe, window_title_re, app_exe):
             return
         try:
             prev = pyperclip.paste()
@@ -788,9 +854,14 @@ def main(argv: list[str]) -> int:
                         help="speaker/headphone for playback: index or name substring (default: from claude_speech.json)")
     parser.add_argument("--rate", default=speak_lang.DEFAULT_RATE, help="edge-tts rate, e.g. -10%% or +5%%")
     parser.add_argument("--window-title-re", default=None,
-                        help="restrict the toolbar to windows whose title matches this regex. "
-                             "Default comes from claude_speech.json's toolbar_window_re, or Claude-only "
-                             "if unset. Pass an empty string to allow any application.")
+                        help="additionally restrict the toolbar to windows whose title matches this "
+                             "regex (combined with --app-exe via AND, so you can pin one window of an "
+                             "app that has several). Comes from claude_speech.json's toolbar_window_re "
+                             "if unset. Pass an empty string to clear it.")
+    parser.add_argument("--app-exe", default=None,
+                        help="restrict the toolbar to the foreground process with this exe basename "
+                             "(default: Claude.exe, from claude_speech.json's toolbar_app_exe). "
+                             "Pass an empty string to allow any application.")
     parser.add_argument("--drag-threshold", type=int, default=DEFAULT_DRAG_THRESHOLD,
                         help=f"pointer travel (px) that counts as a selection (default: {DEFAULT_DRAG_THRESHOLD})")
     parser.add_argument("--timeout-ms", type=int, default=DEFAULT_TIMEOUT_MS,
@@ -830,7 +901,15 @@ def main(argv: list[str]) -> int:
         return 2
 
     window_re = resolve_window_re(args.window_title_re, config)
-    scope = window_re or "any application"
+    app_exe = resolve_app_exe(args.app_exe, config)
+    if app_exe and window_re:
+        scope = f"{app_exe} + title /{window_re}/"
+    elif app_exe:
+        scope = f"{app_exe} only"
+    elif window_re:
+        scope = f"title /{window_re}/"
+    else:
+        scope = "any application"
     logging.info("ready: voice=%s, output_device=%s, target=%s, common=%s, scope=%s",
                  voice, output_device, target_code, common_code, scope)
     print("=" * 60, flush=True)
@@ -844,7 +923,7 @@ def main(argv: list[str]) -> int:
     set_dpi_awareness()  # must precede the first Tk() so geometry uses physical px
     app = SelectionToolbar(voice, output_device, args.rate, target_code, common_code,
                            timeout_ms=args.timeout_ms)
-    listener = make_mouse_listener(app, window_re, args.drag_threshold)
+    listener = make_mouse_listener(app, window_re, app_exe, args.drag_threshold)
     listener.start()
     try:
         app.run()

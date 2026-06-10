@@ -197,11 +197,14 @@ No flags are needed — it reads the voice, output device, language pair, and sc
   plus a collapsible **▸ IPA** transcription (rendered with the same espeak-ng path as F9). Click 🌐
   again to hide it.
 
-**Scope (Claude-only by default).** Out of the box the toolbar only appears when the **Claude app**
-window is focused, so it doesn't pop up while you select text elsewhere. To let it work in any
-application, install with `--toolbar-everywhere` (or set `toolbar_window_re` to `null` in
-`claude_speech.json`). Note that it always reads/translates as the target language, so non-target text
-elsewhere will be mishandled.
+**Scope (Claude-only by default).** Out of the box the toolbar only appears when the **Claude app** is
+focused — matched by its **process** (`Claude.exe`), not the window title, so a browser tab on
+claude.ai (which shares the title but not the exe) won't trigger it. To let it work in any application,
+install with `--toolbar-everywhere` (or set `toolbar_app_exe` to `null` in `claude_speech.json`). You can
+optionally **narrow further by title**: set `toolbar_window_re` to a regex and it's **AND-combined** with
+the exe — handy to pin one window of an app that has several (e.g. `Claude.exe` *and* a title matching
+your project). Note that it always reads/translates as the target language, so non-target text elsewhere
+will be mishandled.
 
 **Dependencies.** The toolbar uses `edge-tts` (via `speak_lang.py`), `argostranslate` (offline
 translation), and `pynput`/`pyperclip` — all pip-installed by `install.py`. The first time you press
@@ -222,7 +225,7 @@ arguments** — it's the single source of truth for the project's setup:
   "voice": "nl-NL-FennaNeural",
   "input_device": "USB PnP",  "output_device": "OnePlus Bullets",
   "target_hotkey": "f9",      "common_hotkey": "f10",
-  "selection_toolbar": true,  "toolbar_window_re": "^Claude"
+  "selection_toolbar": true,  "toolbar_app_exe": "Claude.exe",  "toolbar_window_re": null
 }
 ```
 
@@ -595,7 +598,7 @@ PowerShell defaults to cp1252 codepage. The daemon already forces UTF-8 on stdou
 ### Selection toolbar
 
 **The toolbar doesn't appear when I select text.**
-By default it's **Claude-only** — it only shows when the Claude app window is focused. Selecting text in another app won't trigger it unless you installed with `--toolbar-everywhere` (or set `toolbar_window_re` to `null`). Also note it triggers on a **drag**-select, not a double-click word-select. Confirm the process is running and check `logs/selection_toolbar.log`.
+By default it's **Claude-only** — it only shows when the Claude app (process `Claude.exe`) is focused. Selecting text in another app won't trigger it unless you installed with `--toolbar-everywhere` (or set `toolbar_app_exe` to `null`). Also note it triggers on a **drag**-select, not a double-click word-select. Confirm the process is running and check `logs/selection_toolbar.log`.
 
 **🌐 Translate is slow the first time, or shows "translation unavailable".**
 The first translate downloads the `target→common` Argos model (a few hundred MB) — that one time needs internet. If it never succeeds, check `logs/selection_toolbar.log`; make sure `argostranslate` is installed for the same interpreter (`py -m pip install --user argostranslate`) and that a model exists for your language pair. The 🔊 read button is unaffected.
