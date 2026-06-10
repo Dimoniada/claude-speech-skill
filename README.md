@@ -222,7 +222,7 @@ arguments** — it's the single source of truth for the project's setup:
   "voice": "nl-NL-FennaNeural",
   "input_device": "USB PnP",  "output_device": "OnePlus Bullets",
   "target_hotkey": "f9",      "common_hotkey": "f10",
-  "selection_toolbar": true,  "toolbar_window_re": ".*Claude.*"
+  "selection_toolbar": true,  "toolbar_window_re": "^Claude"
 }
 ```
 

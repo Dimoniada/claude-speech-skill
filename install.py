@@ -51,8 +51,9 @@ DEFAULT_TARGET_HOTKEY = "f9"
 DEFAULT_COMMON_HOTKEY = "f10"
 
 # Selection-toolbar default scope (must match selection_toolbar.DEFAULT_TOOLBAR_WINDOW_RE):
-# Claude-only unless the user opts into "everywhere".
-DEFAULT_TOOLBAR_WINDOW_RE = r".*Claude.*"
+# Claude-only unless the user opts into "everywhere". Anchored at the start so a
+# browser page that merely mentions "Claude" mid-title doesn't count — only the app.
+DEFAULT_TOOLBAR_WINDOW_RE = r"^Claude"
 
 
 def load_voices() -> list[dict]:

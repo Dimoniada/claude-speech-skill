@@ -10,14 +10,15 @@ voice and output device taken from .claude/claude_speech.json.
 This is task 1 of two: the toolbar framework + the Read button. A 🌐 Translate
 button (with a translation popup) is planned next and slots in beside 🔊.
 
-Scope: by default the toolbar appears for selections in ANY application. Pass
---window-title-re '<regex>' to restrict it (e.g. '.*Claude.*'). Note it always
+Scope: by default the toolbar appears only inside the Claude app (window titles
+starting with "Claude"). Pass --window-title-re '<regex>' to override the scope
+(e.g. '^Claude' for Claude-only, or '' for any application). Note it always
 speaks with the configured (target-language) voice, so non-target text elsewhere
 will be mispronounced.
 
 Usage (from a separate terminal, leave it running):
     py selection_toolbar.py
-    py selection_toolbar.py --window-title-re ".*Claude.*"
+    py selection_toolbar.py --window-title-re "^Claude"
     py selection_toolbar.py --voice nl-NL-FennaNeural --output-device "Headphones"
 
 Press Ctrl+C in this terminal to stop.
@@ -84,7 +85,10 @@ TOOLBAR_OFFSET_Y = 16        # selection end (mouse-release point)
 COLOR_IDLE = "white"         # button foreground when inactive
 COLOR_BUSY = "#6b6c6e"       # button foreground while its action is active (grayed)
 POPUP_MARGIN = 2             # uniform inset for the translation popup's contents
-DEFAULT_TOOLBAR_WINDOW_RE = r".*Claude.*"  # default scope: only inside the Claude app
+DEFAULT_TOOLBAR_WINDOW_RE = r"^Claude"  # default scope: only inside the Claude app
+# Anchored at the start so a browser page that merely mentions "Claude" mid-title
+# (e.g. "Anthropic's Claude - Chrome") doesn't count — only the app, whose window
+# title starts with "Claude", does. Match is case-sensitive (re.search).
 
 
 def setup_logging() -> None:
