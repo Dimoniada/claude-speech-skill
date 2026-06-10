@@ -160,10 +160,11 @@ In a Claude Code session, the skill responds to a control argument:
 /claude-speech off
 ```
 
-This is a full off switch for **both** directions of voice:
+This is a full off switch for **everything** the skill runs — both directions of voice and the selection toolbar:
 
-- **Voice in** — terminates every running `push_to_talk.py` daemon **and any `selection_toolbar.py` process**, and clears any pending `latest_transcript.txt` so the fallback hook doesn't keep re-injecting stale content.
+- **Voice in** — terminates every running `push_to_talk.py` daemon and clears any pending `latest_transcript.txt` so the fallback hook doesn't keep re-injecting stale content.
 - **Voice out** — runs `toggle_voice.py --off`, which surgically removes the `speak_lang.py` Stop hook from `.claude/settings.json` (your other hooks and settings are left untouched) and stashes an exact copy in `.claude/speak_lang.hook.json`. Spoken replies stop firing even if Claude still emits `<{code}>` tags. (The hook fires every turn once installed — there's no runtime "skill is active" state in Claude Code — so removing it is the only honest way to silence output.)
+- **Selection toolbar** — terminates any running `selection_toolbar.py` process, so the floating 🔊/🌐 toolbar stops popping up on text selections. (It's a separate background process, not part of either voice direction — see [Selection toolbar](#selection-toolbar).)
 
 Aliases: `stop`, `kill`.
 
