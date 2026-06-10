@@ -74,6 +74,17 @@ def test_window_allowed_handles_empty_title_with_regex():
     assert st.window_allowed("", r".*Claude.*") is False
 
 
+def test_default_scope_requires_title_to_start_with_claude():
+    # Regression: the Claude-only default must NOT fire in a browser whose title
+    # merely *contains* "Claude" mid-string (the old `.*Claude.*` did). Only the
+    # app, whose window title starts with "Claude", should match.
+    re_ = st.DEFAULT_TOOLBAR_WINDOW_RE
+    assert st.window_allowed("Claude", re_) is True
+    assert st.window_allowed("Claude — Anthropic", re_) is True
+    assert st.window_allowed("Anthropic's Claude - Google Chrome", re_) is False
+    assert st.window_allowed("Reddit - r/Claude — Firefox", re_) is False
+
+
 # --- resolve_window_re -----------------------------------------------------
 
 def test_resolve_window_re_cli_value_wins():
