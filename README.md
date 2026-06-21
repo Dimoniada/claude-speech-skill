@@ -62,6 +62,10 @@ flowchart LR
     T2 --> T4 --> T5
   end
 
+  %% invisible links pin the lane order left-to-right (1 → 2 → 3)
+  I1 ~~~ O1
+  O1 ~~~ T1
+
   classDef resident fill:#EEEDFE,stroke:#7F77DD,stroke-width:2.2px,color:#26215C;
   classDef ondemand fill:#E6F1FB,stroke:#378ADD,color:#042C53;
   classDef library fill:#E1F5EE,stroke:#1D9E75,color:#04342C;
