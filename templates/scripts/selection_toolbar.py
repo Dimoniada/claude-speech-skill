@@ -468,9 +468,11 @@ class SelectionToolbar:
         # playback (PortAudio) can abort hard when interrupted, and we never want
         # that to take down the toolbar. Stopping is just terminate().
         try:
-            cmd = [sys.executable, str(SELF_PATH), "--speak", "--voice", self.voice, "--rate", self.rate]
+            # Use --opt=value form: rate values like "-10%" start with "-" and
+            # argparse would otherwise mistake them for an option flag.
+            cmd = [sys.executable, str(SELF_PATH), "--speak", f"--voice={self.voice}", f"--rate={self.rate}"]
             if self.output_device is not None:
-                cmd += ["--output-device", str(self.output_device)]
+                cmd += [f"--output-device={self.output_device}"]
             proc = subprocess.Popen(
                 cmd, stdin=subprocess.PIPE,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
