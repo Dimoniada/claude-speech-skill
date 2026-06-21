@@ -25,53 +25,60 @@ The skill scaffolds these files into your project:
 
 ### Processes at a glance
 
-When the skill is active it runs three independent flows around the Claude app — a per-reply **Stop hook**, a **push-to-talk daemon** (with a resident Whisper server), and a **selection-toolbar daemon** — all reading one shared config:
+When the skill is active it runs three flows — **voice in**, **voice out**, and the **selection toolbar**. Each box below is colour-coded by **what it actually is** — a resident process, an on-demand process, an in-process library, or a remote call — so you can see exactly what's running:
 
 ```mermaid
-flowchart TB
-  subgraph OUT["1 · Voice out (TTS) — Stop hook, fires on every reply"]
-    direction LR
-    A1["Claude reply<br/>text in &lt;nl&gt; tags"]:::io
-    A2["speak_lang.py<br/>Stop hook"]:::skill
-    A3["edge-tts ☁<br/>online synthesis"]:::online
-    A4["🔊 Speaker<br/>miniaudio + sounddevice"]:::io
-    A1 --> A2 --> A3 --> A4
+flowchart LR
+  subgraph IN["1 · Voice in (F9 / F10)"]
+    direction TB
+    I1["🎤 Microphone<br/>audio input device"]:::io
+    I2["push_to_talk.py<br/>● resident process"]:::resident
+    I3["whisper-server.exe<br/>● resident process · local STT"]:::resident
+    I4["espeak-ng.exe<br/>▭ on-demand process · IPA"]:::ondemand
+    I5["Text → chat<br/>paste (pywinauto)"]:::io
+    I6["inject_transcript.py<br/>▭ on-demand process · fallback"]:::ondemand
+    I1 --> I2 --> I3 --> I4 --> I5
+    I5 -.-> I6
   end
 
-  subgraph INP["2 · Voice in (F9/F10) — background daemon + resident server"]
-    direction LR
-    B1["🎤 Microphone<br/>hold F9 / F10"]:::io
-    B2["push_to_talk.py<br/>background daemon"]:::skill
-    B3["whisper-server.exe<br/>local · port 8910"]:::local
-    B4["Text → chat<br/>+IPA espeak-ng · pywinauto"]:::io
-    B1 --> B2 --> B3 --> B4
-    B5["inject_transcript.py — UserPromptSubmit hook · fallback"]:::skill
+  subgraph OUT["2 · Voice out (TTS)"]
+    direction TB
+    O1["Claude reply<br/>text in &lt;nl&gt; tags"]:::io
+    O2["speak_lang.py<br/>▭ on-demand process · Stop hook"]:::ondemand
+    O3["edge-tts<br/>○ library → Microsoft cloud ☁"]:::remote
+    O4["🔊 Speaker<br/>miniaudio · sounddevice (libs)"]:::io
+    O1 --> O2 --> O3 --> O4
   end
 
-  subgraph TBR["3 · Selection toolbar — background daemon"]
-    direction LR
-    C1["Select text<br/>inside Claude.exe"]:::io
-    C2["selection_toolbar.py<br/>background daemon"]:::skill
-    C3a["🌐 argostranslate<br/>offline translate"]:::local
-    C3b["🔊 edge-tts ☁<br/>read aloud (online)"]:::online
-    C4["Popup tkinter<br/>translation + IPA"]:::io
-    C1 --> C2 --> C3a --> C4
-    C2 --> C3b --> C4
+  subgraph TBR["3 · Selection toolbar"]
+    direction TB
+    T1["Select text<br/>inside Claude.exe"]:::io
+    T2["selection_toolbar.py<br/>● resident process"]:::resident
+    T3["🌐 argostranslate<br/>○ library · local"]:::library
+    T4["🔊 Read child<br/>▭ on-demand → edge-tts ☁"]:::ondemand
+    T5["Popup tkinter<br/>translation + IPA"]:::io
+    T1 --> T2
+    T2 --> T3 --> T5
+    T2 --> T4 --> T5
   end
 
-  CFG[".claude/claude_speech.json — single config, read by every process"]:::cfg
-  CFG -.-> A2
-  CFG -.-> B2
-  CFG -.-> C2
-
-  classDef skill fill:#EEEDFE,stroke:#7F77DD,color:#26215C;
-  classDef local fill:#E1F5EE,stroke:#1D9E75,color:#04342C;
-  classDef online fill:#FAECE7,stroke:#D85A30,color:#4A1B0C;
+  classDef resident fill:#EEEDFE,stroke:#7F77DD,stroke-width:2.2px,color:#26215C;
+  classDef ondemand fill:#E6F1FB,stroke:#378ADD,color:#042C53;
+  classDef library fill:#E1F5EE,stroke:#1D9E75,color:#04342C;
+  classDef remote fill:#FAECE7,stroke:#D85A30,color:#4A1B0C;
   classDef io fill:#F1EFE8,stroke:#B4B2A9,color:#2C2C2A;
-  classDef cfg fill:#F1EFE8,stroke:#888780,color:#2C2C2A;
 ```
 
-**Legend:** violet = the skill's own processes (daemons & hooks) · green = local engines, fully offline (Whisper, espeak-ng, argostranslate) · orange = the one online dependency (`edge-tts`). Replacing `edge-tts` with a local engine would make the whole skill offline.
+**Legend:** ● resident process · ▭ on-demand process (spawned per event, then exits) · ○ library (runs inside another process, not its own) · ☁ remote (`edge-tts` → Microsoft cloud) · plain = I/O or data.
+
+**Processes while the skill is active** — what you'd see in Task Manager:
+
+- **Resident — 3 (always running):** `push_to_talk.py`, `whisper-server.exe`, `selection_toolbar.py` (i.e. two `python` processes + `whisper-server.exe`).
+- **On-demand (spawned per event, then exit):** `speak_lang.py` (per reply), `inject_transcript.py` (per message), `espeak-ng.exe` (per IPA), `selection_toolbar.py --speak` (per 🔊 Read — playback is isolated in its own child process).
+- **Libraries (no process of their own):** `argostranslate` (local), `miniaudio`, `sounddevice`, `pynput`, `pywinauto`, `pyperclip`.
+- **Leaves your machine:** only `edge-tts` → Microsoft's cloud. Everything else — Whisper STT, espeak-ng IPA, argostranslate — runs locally. (Swapping `edge-tts` for a local engine would make the skill fully offline.)
+
+All three flows read one shared config, [`.claude/claude_speech.json`](#configuration-claude_speechjson).
 
 **Output flow.** When Claude finishes a reply, the Stop hook reads the transcript, pulls every `<{code}>...</{code}>` block (where `{code}` is the ISO 639-1 code of the language you're learning), and pipes them to `edge-tts` for playback.
 
