@@ -23,6 +23,56 @@ The skill scaffolds these files into your project:
 | `scripts/selection_toolbar.py` | Floating select-text → 🔊 read / 🌐 translate toolbar (separate background process). See [Selection toolbar](#selection-toolbar) |
 | `scripts/cs_common.py` | Shared helpers (config loading, audio-device resolution) imported by the scripts above |
 
+### Processes at a glance
+
+When the skill is active it runs three independent flows around the Claude app — a per-reply **Stop hook**, a **push-to-talk daemon** (with a resident Whisper server), and a **selection-toolbar daemon** — all reading one shared config:
+
+```mermaid
+flowchart TB
+  subgraph OUT["1 · Voice out (TTS) — Stop hook, fires on every reply"]
+    direction LR
+    A1["Claude reply<br/>text in &lt;nl&gt; tags"]:::io
+    A2["speak_lang.py<br/>Stop hook"]:::skill
+    A3["edge-tts ☁<br/>online synthesis"]:::online
+    A4["🔊 Speaker<br/>miniaudio + sounddevice"]:::io
+    A1 --> A2 --> A3 --> A4
+  end
+
+  subgraph INP["2 · Voice in (F9/F10) — background daemon + resident server"]
+    direction LR
+    B1["🎤 Microphone<br/>hold F9 / F10"]:::io
+    B2["push_to_talk.py<br/>background daemon"]:::skill
+    B3["whisper-server.exe<br/>local · port 8910"]:::local
+    B4["Text → chat<br/>+IPA espeak-ng · pywinauto"]:::io
+    B1 --> B2 --> B3 --> B4
+    B5["inject_transcript.py — UserPromptSubmit hook · fallback"]:::skill
+  end
+
+  subgraph TBR["3 · Selection toolbar — background daemon"]
+    direction LR
+    C1["Select text<br/>inside Claude.exe"]:::io
+    C2["selection_toolbar.py<br/>background daemon"]:::skill
+    C3a["🌐 argostranslate<br/>offline translate"]:::local
+    C3b["🔊 edge-tts ☁<br/>read aloud (online)"]:::online
+    C4["Popup tkinter<br/>translation + IPA"]:::io
+    C1 --> C2 --> C3a --> C4
+    C2 --> C3b --> C4
+  end
+
+  CFG[".claude/claude_speech.json — single config, read by every process"]:::cfg
+  CFG -.-> A2
+  CFG -.-> B2
+  CFG -.-> C2
+
+  classDef skill fill:#EEEDFE,stroke:#7F77DD,color:#26215C;
+  classDef local fill:#E1F5EE,stroke:#1D9E75,color:#04342C;
+  classDef online fill:#FAECE7,stroke:#D85A30,color:#4A1B0C;
+  classDef io fill:#F1EFE8,stroke:#B4B2A9,color:#2C2C2A;
+  classDef cfg fill:#F1EFE8,stroke:#888780,color:#2C2C2A;
+```
+
+**Legend:** violet = the skill's own processes (daemons & hooks) · green = local engines, fully offline (Whisper, espeak-ng, argostranslate) · orange = the one online dependency (`edge-tts`). Replacing `edge-tts` with a local engine would make the whole skill offline.
+
 **Output flow.** When Claude finishes a reply, the Stop hook reads the transcript, pulls every `<{code}>...</{code}>` block (where `{code}` is the ISO 639-1 code of the language you're learning), and pipes them to `edge-tts` for playback.
 
 **Input flow.** The push-to-talk daemon runs in a separate terminal. Hold **F9** (learned language) or **F10** (native language) anywhere — both are global hotkeys → it records 16 kHz mono PCM → release the key → it sends the clip to a local resident `whisper-server` (started once and kept warm in VRAM), forcing the language bound to the key you held (no auto-detection) → for the learned language it then runs `espeak-ng --ipa` to render IPA → finally it focuses your Claude Code window and pastes the payload (`text` alone for the native language, `text\n[IPA]` for the learned one) + Enter. If window-focus is blocked by Windows 11 anti-focus-stealing, it falls back to writing `recordings/latest_transcript.txt`, and the `UserPromptSubmit` hook injects it on your next manual Enter.
